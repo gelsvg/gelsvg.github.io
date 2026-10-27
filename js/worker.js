@@ -58,6 +58,7 @@ onmessage = async (event) => {
     if (type === "open") result = toPlain(bridge.open_document(new Uint8Array(event.data.bytes), event.data.name));
     else if (type === "aligned") result = toPlain(bridge.aligned(event.data.panel, event.data.element));
     else if (type === "save") result = toPlain(bridge.save(event.data.panel, event.data.what, event.data.element ?? null));
+    else if (type === "compare") result = toPlain(bridge.compare(event.data.panel));
     else throw new Error(`Unknown request ${type}.`);
     postMessage({ type: "done", id, result });  // copied, never transferred: no buffer may be Python's memory
   } catch (error) {

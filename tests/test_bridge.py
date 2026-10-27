@@ -128,9 +128,15 @@ def test_the_tables():
     assert panel["notices"] == []
     t = panel["tables"]
     assert t["conditions"] == [{"id": "t1", "name": "Genotype"}]
-    assert t["lanes"][0] == {"lane": "1", "point": True, "x": 2, "y": 1, "details": "WT", "values": {"t1": "WT"}}
+    assert t["lanes"][0] == {"id": "1", "lane": "1", "point": True, "x": 2, "y": 1, "details": "WT", "values": {"t1": "WT"}}
     assert t["lanes"][1]["lane"] == "n1" and t["lanes"][1]["point"] is False
     assert [(b["lane"], b["row"], b["shape"]) for b in t["bands"]] == [("1", "p-ERK", "rect"), ("n1", "p-ERK", "point")]
+    assert [(b["lane_id"], b["row_id"]) for b in t["bands"]] == [("1", "r1"), ("n1", "r1")]
+    assert t["rows"] == [{"id": "r1", "name": "p-ERK"}] and t["lanes"][0]["id"] == "1"
+    assert t["redrawable"] is True and t["views"][0]["size"] == [6, 8]
+    assert t["orientation"] == {"turn": 0, "flip": False, "rotation": 0} and t["output_bit_depth"] == 16
+    assert t["drawing"] == [{"kind": "blot", "index": 0, "channel": "gray", "file_name": "blot.tif", "shape": [6, 8],
+                             "contrast": [0, 65535], "invert": True, "color": None, "turn": None, "flip": None}]
     assert t["bands"][1]["detection"] == {"by": "detector 1", "score": 0.93}
     assert t["markers"] == [{"label": "50", "size": {"value": 50, "unit": "kDa"}, "x": 0.5, "y": 3}]
     (q,) = t["quantifications"]
@@ -187,3 +193,38 @@ def test_a_view_without_embedded_pixels():
     result = bridge.open_document(old_document(), "old.mywb.svg")
     (view,) = result["panels"][0]["tables"]["views"]
     assert view["available"] is False and view["saveable"] is False
+    assert result["panels"][0]["tables"]["redrawable"] is False
+
+
+def test_redraw_and_compare():
+    bridge.open_document(svg_of(a_full_panel()), "x")
+    result = bridge.compare(0)
+    assert result["state"] == "same" and result["differing"] == 0 and result["notes"] == []
+    assert Image.open(io.BytesIO(result["redrawn_png"])).size == (8, 6)
+
+
+def test_a_picture_that_was_changed_after_drawing():
+    pixels = (np.arange(48, dtype=np.uint8).reshape(6, 8) * 5)
+    core = {"sources": [{"id": "s1", "dtype": "uint8", "shape": [6, 8],
+                         "channels": [{"name": "gray", "pixel_hash": gelsvg.pixel_hash(pixels)}]}],
+            "blot": [{"id": "c1", "source": "s1", "source_channel": "gray", "invert": False, "contrast": [0, 255]}],
+            "orientation": {"turn": 0, "flip": False, "rotation": 0}, "output_bit_depth": 8}
+    painted = pixels.copy()
+    painted[2, 3] = 0
+    painted[4, 5] = 255
+    png = gelsvg.new_panel(gelsvg.Content({"core": core, "figure": {"crop": gelsvg.default_crop(core)}},
+                                          rendered=painted, channel_images=[pixels]), TOOL)
+    bridge.open_document(svg_of(png), "x")
+    result = bridge.compare(0)
+    # 95 painted 0 at (2, 3), 185 painted 255 at (4, 5)
+    assert result["state"] == "differs" and result["differing"] == 2 and result["largest"] == 95
+    diff = np.asarray(Image.open(io.BytesIO(result["difference_png"])))
+    assert tuple(diff[2, 3]) == (255, 0, 255)
+    assert tuple(diff[4, 5]) == (int(255 * (0.35 + 0.65 * 70 / 95)), 0, int(255 * (0.35 + 0.65 * 70 / 95)))
+    assert diff[0, 1, 0] == diff[0, 1, 1] == diff[0, 1, 2]  # the rest is the picture in grey
+
+
+def test_a_panel_without_pixels_cannot_be_redrawn():
+    bridge.open_document(old_document(), "old.mywb.svg")
+    result = bridge.compare(0)
+    assert result["state"] == "cannot" and "not embedded" in result["message"]

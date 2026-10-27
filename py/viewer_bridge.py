@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import sys
 
+import numpy as np
+
 import gelsvg
-from gelsvg import Kind, _encode, _svghash, legacy
+from gelsvg import Kind, _encode, _png, _svghash, legacy
 
 import viewer_metadata
 
@@ -99,6 +101,7 @@ def _tables(panel) -> dict:
         uses.setdefault(element["source"], []).append(f"blot element {i + 1} ({element['source_channel']})")
     if "marker" in core:
         uses.setdefault(core["marker"]["source"], []).append(f"marker image ({core['marker']['source_channel']})")
+    views = _views(panel, core)
     sources = []
     for source in core.get("sources", []):
         item = {k: source.get(k) for k in ("id", "file_name", "file_hash", "dtype", "shape")}
@@ -116,10 +119,11 @@ def _tables(panel) -> dict:
 
     return {
         "conditions": [{"id": c["id"], "name": c.get("name")} for c in samples.get("conditions", [])],
-        "lanes": [{"lane": lane_name[lane["id"]], "point": "number" in lane, "x": lane.get("x"), "y": lane.get("y"),
-                   "details": lane.get("details"), "values": lane.get("values", {})} for lane in lanes],
-        "bands": [{**where(b), "shape": b["shape"], "x": b["x"], "y": b["y"], "w": b.get("w"), "h": b.get("h"),
-                   "detection": b.get("detection")} for b in core.get("bands", [])],
+        "lanes": [{"id": lane["id"], "lane": lane_name[lane["id"]], "point": "number" in lane, "x": lane.get("x"),
+                   "y": lane.get("y"), "details": lane.get("details"), "values": lane.get("values", {})} for lane in lanes],
+        "rows": [{"id": row["id"], "name": row.get("name")} for row in rows],
+        "bands": [{**where(b), "lane_id": b["lane"], "row_id": b["row"], "shape": b["shape"], "x": b["x"], "y": b["y"],
+                   "w": b.get("w"), "h": b.get("h"), "detection": b.get("detection")} for b in core.get("bands", [])],
         "markers": [{"label": m["label"], "size": m.get("size"), "x": m["x"], "y": m["y"]} for m in core.get("markers", [])],
         "quantifications": quantifications,
         "sources": sources,
@@ -128,8 +132,31 @@ def _tables(panel) -> dict:
         "json": json.dumps(panel.raw, indent=2, ensure_ascii=False),
         "roi": core.get("roi"),
         "crop": panel.figure.get("crop"),
-        "views": _views(panel, core),
+        "views": views,
+        "orientation": core.get("orientation"),
+        "output_bit_depth": core.get("output_bit_depth"),
+        "drawing": _drawing(core),
+        "redrawable": panel.rendered is not None and panel.figure.get("crop") is not None
+                      and all(v["available"] for v in views if v["element"] != "marker"),
     }
+
+
+def _drawing(core: dict) -> list[dict]:
+    """How each image is drawn: its channel, contrast, inversion and colour,
+    and how it is lined up with the reference channel."""
+
+    files = {s["id"]: (s.get("file_name"), s.get("shape")) for s in core.get("sources", [])}
+    items = [("blot", i, e) for i, e in enumerate(core.get("blot", []))]
+    if "marker" in core:
+        items.append(("marker", None, core["marker"]))
+    out = []
+    for kind, i, e in items:
+        file_name, shape = files.get(e["source"], (None, None))
+        out.append({"kind": kind, "index": i, "channel": e["source_channel"], "file_name": file_name, "shape": shape,
+                    "contrast": e["contrast"], "invert": e["invert"], "color": e.get("color"),
+                    "turn": e.get("turn") if kind == "marker" or i else None,
+                    "flip": e.get("flip") if kind == "marker" or i else None})
+    return out
 
 
 def _channels_of(core: dict, element: dict) -> list[str | None]:
@@ -148,14 +175,20 @@ def _views(panel, core: dict) -> list[dict]:
     items = [(i, e, f"Blot element {i + 1}") for i, e in enumerate(core.get("blot", []))]
     if "marker" in core:
         items.append(("marker", core["marker"], "Marker image"))
+    try:
+        size = list(gelsvg.aligned_size(core))
+    except ValueError:
+        size = None
     out = []
     for key, element, label in items:
         hashes = _channels_of(core, element)
         source = next((s for s in core.get("sources", []) if s["id"] == element["source"]), {})
         out.append({"element": key, "label": f"{label} ({element['source_channel']})",
+                    "channel": element["source_channel"], "file_name": source.get("file_name"),
                     "available": all(h in panel.channel_images for h in hashes),
                     "saveable": element["source_channel"] != "average" and hashes[0] in panel.channel_images,
-                    "contrast": element["contrast"], "invert": element["invert"], "dtype": source.get("dtype")})
+                    "contrast": element["contrast"], "invert": element["invert"], "dtype": source.get("dtype"),
+                    "size": size})
     return out
 
 
@@ -175,6 +208,77 @@ def aligned(panel_index: int, element) -> dict:
     image = _open["aligned"][key]
     return {"dtype": "uint8" if image.dtype.itemsize == 1 else "uint16", "shape": list(image.shape),
             "pixels": image.astype("<u2" if image.dtype.itemsize == 2 else "u1").tobytes()}
+
+
+def _png_of(pixels: np.ndarray) -> bytes:
+    header, stream = _encode.encode_image(pixels)
+    return _png.PNG_SIGNATURE + header + _encode.idat_chunks(stream) + _encode.IEND
+
+
+def _difference_map(picture: np.ndarray, difference: np.ndarray, largest: int) -> np.ndarray:
+    """The picture dimmed in grey, with the pixels that differ in magenta,
+    brighter where they differ more."""
+
+    grey = picture if picture.ndim == 2 else picture.mean(axis=2)
+    top = 65535 if picture.dtype == np.uint16 else 255
+    base = (grey.astype(np.float64) / top * 255 * 0.4).astype(np.uint8)
+    out = np.stack([base, base, base], axis=2)
+    where = difference > 0
+    strength = 0.35 + 0.65 * (difference[where].astype(np.float64) / max(largest, 1))
+    out[where] = np.stack([255 * strength, np.zeros_like(strength), 255 * strength], axis=1).astype(np.uint8)
+    return out
+
+
+def compare(panel_index: int) -> dict:
+    """Draw the panel's picture again from its embedded pixels with the
+    reference method (§6.2) and compare it with the picture in the file."""
+
+    panel = _open["doc"].panels[panel_index]
+
+    def cannot(message: str) -> dict:
+        return {"state": "cannot", "message": message, "notes": []}
+
+    if panel.rendered is None:
+        return cannot("The panel's picture cannot be decoded, so there is nothing to compare.")
+    crop = panel.figure.get("crop")
+    if crop is None:
+        return cannot("Which part of the panel the picture shows is not known ('crop'), so it cannot be drawn again.")
+    try:
+        drawn = gelsvg.render(panel.to_json()["core"], panel.channel_images, crop)
+    except ValueError as exc:
+        text = str(exc)
+        if "is not given" in text or "never read" in text or "no 'shape'" in text:
+            return cannot("The panel's pixels are not embedded in the file, so it cannot be drawn again here.")
+        return cannot(f"The panel cannot be drawn again: {text}")
+
+    notes = []
+    if panel.checks.get("drawn_from") is False:
+        notes.append("The data changed after the picture was drawn (drawn_from), so a picture drawn from today's data "
+                     "is expected to differ.")
+    mywb = (panel.extensions.get(legacy.MYWB_EXTENSION) or {}).get("value") or {}
+    if "converted_from" in mywb and panel.to_json()["core"]["orientation"]["rotation"] != 0:
+        notes.append("This picture was drawn by an older MyWB, whose fine rotation used a different interpolation; "
+                     "band edges are expected to differ a little (specification §4.3).")
+    top = 65535 if panel.rendered.dtype == np.uint16 else 255
+    result = {"top": top, "notes": notes, "redrawn_png": _png_of(drawn)}
+    if drawn.shape != panel.rendered.shape or drawn.dtype != panel.rendered.dtype:
+        result.update(state="differs", message=(
+            f"The picture is {panel.rendered.shape[1]} × {panel.rendered.shape[0]} ({panel.rendered.dtype}); drawn again it "
+            f"is {drawn.shape[1]} × {drawn.shape[0]} ({drawn.dtype})."))
+        return result
+    difference = np.abs(drawn.astype(np.int64) - panel.rendered.astype(np.int64))
+    if difference.ndim == 3:
+        difference = difference.max(axis=2)
+    differing = int((difference > 0).sum())
+    result.update(pixels=int(difference.size), differing=differing)
+    if not differing:
+        result.update(state="same", message="The picture matches the one drawn again from the embedded pixels, pixel for pixel.")
+        return result
+    largest = int(difference.max())
+    result.update(state="differs", largest=largest, mean=float(difference.mean()),
+                  difference_png=_png_of(_difference_map(panel.rendered, difference, largest)),
+                  message=f"{differing} of {difference.size} pixels differ; the largest difference is {largest} of {top}.")
+    return result
 
 
 def save(panel_index: int, what: str, element=None) -> dict:
