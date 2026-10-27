@@ -54,10 +54,12 @@ onmessage = async (event) => {
   const { id, type } = event.data;
   try {
     const bridge = await ready;
-    if (type === "open") {
-      const result = toPlain(bridge.open_document(new Uint8Array(event.data.bytes), event.data.name));
-      postMessage({ type: "opened", id, result });  // copied, never transferred: no buffer may be Python's memory
-    }
+    let result;
+    if (type === "open") result = toPlain(bridge.open_document(new Uint8Array(event.data.bytes), event.data.name));
+    else if (type === "aligned") result = toPlain(bridge.aligned(event.data.panel, event.data.element));
+    else if (type === "save") result = toPlain(bridge.save(event.data.panel, event.data.what, event.data.element ?? null));
+    else throw new Error(`Unknown request ${type}.`);
+    postMessage({ type: "done", id, result });  // copied, never transferred: no buffer may be Python's memory
   } catch (error) {
     postMessage({ type: "error", id, text: String(error && error.message ? error.message : error) });
   }

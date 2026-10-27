@@ -10,11 +10,13 @@ import json
 import sys
 
 import gelsvg
-from gelsvg import Kind, legacy
+from gelsvg import Kind, _encode, _svghash, legacy
 
 import viewer_metadata
 
 VIEWER = gelsvg.Tool("GelSVG Viewer", "0.1.0")
+_open: dict = {"doc": None, "aligned": {}}
+"""The document last opened, and the aligned images worked out for it."""
 
 
 def versions() -> dict:
@@ -124,7 +126,74 @@ def _tables(panel) -> dict:
         "annotation": core.get("annotation"),
         "note": core.get("note"),
         "json": json.dumps(panel.raw, indent=2, ensure_ascii=False),
+        "roi": core.get("roi"),
+        "crop": panel.figure.get("crop"),
+        "views": _views(panel, core),
     }
+
+
+def _channels_of(core: dict, element: dict) -> list[str | None]:
+    source = next((s for s in core.get("sources", []) if s["id"] == element["source"]), None)
+    if source is None:
+        return [None]
+    names = ["red", "green", "blue"] if element["source_channel"] == "average" else [element["source_channel"]]
+    hashes = {c["name"]: c.get("pixel_hash") for c in source["channels"]}
+    return [hashes.get(n) for n in names]
+
+
+def _views(panel, core: dict) -> list[dict]:
+    """The aligned images the page can show: one per blot element, and the
+    marker image."""
+
+    items = [(i, e, f"Blot element {i + 1}") for i, e in enumerate(core.get("blot", []))]
+    if "marker" in core:
+        items.append(("marker", core["marker"], "Marker image"))
+    out = []
+    for key, element, label in items:
+        hashes = _channels_of(core, element)
+        source = next((s for s in core.get("sources", []) if s["id"] == element["source"]), {})
+        out.append({"element": key, "label": f"{label} ({element['source_channel']})",
+                    "available": all(h in panel.channel_images for h in hashes),
+                    "saveable": element["source_channel"] != "average" and hashes[0] in panel.channel_images,
+                    "contrast": element["contrast"], "invert": element["invert"], "dtype": source.get("dtype")})
+    return out
+
+
+def _element(value):
+    return "marker" if value == "marker" else int(value)
+
+
+def aligned(panel_index: int, element) -> dict:
+    """The aligned image (§4.2) of a blot element or the marker image, as
+    little-endian samples for a typed array on the page."""
+
+    element = _element(element)
+    key = (panel_index, element)
+    if key not in _open["aligned"]:
+        panel = _open["doc"].panels[panel_index]
+        _open["aligned"][key] = gelsvg.aligned_image(panel.to_json()["core"], panel.channel_images, element)
+    image = _open["aligned"][key]
+    return {"dtype": "uint8" if image.dtype.itemsize == 1 else "uint16", "shape": list(image.shape),
+            "pixels": image.astype("<u2" if image.dtype.itemsize == 2 else "u1").tobytes()}
+
+
+def save(panel_index: int, what: str, element=None) -> dict:
+    """A file to save: the panel's picture without its data, an embedded
+    channel image as it was embedded, or an aligned image; all PNG."""
+
+    panel = _open["doc"].panels[panel_index]
+    name = f"panel-{panel_index + 1}"
+    if what == "picture":
+        return {"bytes": _svghash.png_without_panel_data(panel.carrier.png), "name": f"{name}-picture.png"}
+    element = _element(element)
+    suffix = "marker" if element == "marker" else f"blot-{element + 1}"
+    if what == "aligned":
+        aligned(panel_index, element)
+        return {"bytes": _encode.channel_png(_open["aligned"][(panel_index, element)]), "name": f"{name}-{suffix}-aligned.png"}
+    core = panel.to_json()["core"]
+    item = core["marker"] if element == "marker" else core["blot"][element]
+    (key,) = _channels_of(core, item)
+    return {"bytes": panel.core.channel_images[key]["payload"], "name": f"{name}-{suffix}-channel.png"}
 
 
 def open_document(data: bytes, file_name: str) -> dict:
@@ -153,4 +222,5 @@ def open_document(data: bytes, file_name: str) -> dict:
                              "missing": a.missing} for a in doc.assemblies]
     result["panels"] = [_panel(p) for p in doc.panels]
     result["legacy_left"] = len(doc.legacy)
+    _open["doc"], _open["aligned"] = doc, {}
     return result

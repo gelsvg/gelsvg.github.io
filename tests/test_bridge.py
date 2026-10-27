@@ -162,3 +162,28 @@ def test_metadata_rows_of_other_formats():
     entry, payload = gelsvg.read_source(jpeg.getvalue()).metadata
     rows = viewer_metadata.rows("jpeg", check_formal("jpeg", payload)[0], payload)
     assert [r["value"].split(" (")[0] for r in rows] == ["JFIF", "a note"]
+
+
+def test_aligned_images_and_saves():
+    result = bridge.open_document(svg_of(a_full_panel()), "x")
+    (panel,) = result["panels"]
+    (view,) = panel["tables"]["views"]
+    assert view["available"] and view["saveable"] and view["contrast"] == [0, 65535] and view["invert"] is True
+    got = bridge.aligned(0, 0)
+    pixels = np.frombuffer(got["pixels"], dtype="<u2").reshape(got["shape"])
+    assert got["dtype"] == "uint16" and np.array_equal(pixels, np.arange(48, dtype=np.uint16).reshape(6, 8) * 900)
+    assert panel["tables"]["crop"] == {"x": 0, "y": 0, "w": 8, "h": 6}
+    picture = bridge.save(0, "picture")
+    assert picture["name"] == "panel-1-picture.png" and b"GelSVG" not in picture["bytes"] and b"geLs" not in picture["bytes"]
+    assert Image.open(io.BytesIO(picture["bytes"])).size == (8, 6)
+    channel = bridge.save(0, "channel", 0)
+    from gelsvg._embedded import decode_channel_png
+    assert np.array_equal(decode_channel_png(channel["bytes"])[0], pixels)
+    aligned_png = bridge.save(0, "aligned", 0)
+    assert np.array_equal(decode_channel_png(aligned_png["bytes"])[0], pixels) and aligned_png["name"].endswith("-blot-1-aligned.png")
+
+
+def test_a_view_without_embedded_pixels():
+    result = bridge.open_document(old_document(), "old.mywb.svg")
+    (view,) = result["panels"][0]["tables"]["views"]
+    assert view["available"] is False and view["saveable"] is False

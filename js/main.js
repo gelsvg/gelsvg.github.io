@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 const pending = new Map();
 let nextId = 1;
 let urls = [];
+let baseName = "gelsvg";
 
 const KINDS = [
   ["UNREADABLE", "Unreadable"],
@@ -79,11 +80,11 @@ worker.onmessage = (event) => {
     $("engine-text").textContent = `Python could not be started: ${message.text}`;
     for (const { reject } of pending.values()) reject(new Error(message.text));
     pending.clear();
-  } else if (message.type === "opened" || message.type === "error") {
+  } else if (message.type === "done" || message.type === "error") {
     const job = pending.get(message.id);
     pending.delete(message.id);
     if (!job) return;
-    if (message.type === "opened") job.resolve(message.result);
+    if (message.type === "done") job.resolve(message.result);
     else job.reject(new Error(message.text));
   }
 };
@@ -102,6 +103,7 @@ async function openFile(file) {
   for (const url of urls) URL.revokeObjectURL(url);
   urls = [];
   const bytes = new Uint8Array(await file.arrayBuffer());
+  baseName = file.name.replace(/(\.gel|\.mywb|\.my_wb)?\.svg$/i, "") || "gelsvg";
   $("document").hidden = false;
   $("doc-title").textContent = file.name;
   $("doc-banners").replaceChildren();
@@ -251,6 +253,7 @@ function panelTabs(panel) {
   const t = panel.tables;
   const count = (label, n) => (n ? `${label} (${n})` : label);
   return tabs([
+    { label: "Image", build: () => imageTab(panel) },
     { label: count("Samples", t.lanes.length), build: () => samplesTab(t) },
     { label: count("Bands", t.bands.length), build: () => bandsTab(t) },
     { label: count("Markers", t.markers.length), build: () => markersTab(t) },
@@ -390,3 +393,203 @@ window.addEventListener("drop", (event) => {
   const [file] = event.dataTransfer.files;
   if (file) openFile(file);
 });
+
+// --- the image tab ---------------------------------------------------------------------------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const overlays = { lanes: true, bands: true, markers: true, roi: true, crop: false };
+const OVERLAY_LABELS = { lanes: "Lane points", bands: "Bands", markers: "Marker labels", roi: "ROI", crop: "Picture's range" };
+
+function svgEl(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+  return node;
+}
+
+function overlay(t, box) {
+  const [x0, y0, w, h] = box;
+  const svg = svgEl("svg", { class: "overlay", viewBox: `${x0} ${y0} ${w} ${h}`, preserveAspectRatio: "none" });
+  const unit = Math.max(w, h) / 120;
+  const label = (x, y, text, anchor = "middle") => {
+    const node = svgEl("text", { x, y, "font-size": unit * 1.8, "text-anchor": anchor, class: "ov-text" });
+    node.textContent = text;
+    return node;
+  };
+  if (overlays.crop && t.crop) svg.append(svgEl("rect", { x: t.crop.x, y: t.crop.y, width: t.crop.w, height: t.crop.h, class: "ov-crop" }));
+  if (overlays.roi && t.roi) svg.append(svgEl("rect", { x: t.roi.x, y: t.roi.y, width: t.roi.w, height: t.roi.h, class: "ov-roi" }));
+  if (overlays.bands) {
+    for (const b of t.bands) {
+      if (b.shape === "rect") svg.append(svgEl("rect", { x: b.x, y: b.y, width: b.w, height: b.h, class: "ov-band" }));
+      else svg.append(svgEl("circle", { cx: b.x, cy: b.y, r: unit * 0.7, class: "ov-band" }));
+    }
+  }
+  if (overlays.lanes) {
+    for (const lane of t.lanes) {
+      if (!lane.point) continue;
+      svg.append(svgEl("circle", { cx: lane.x, cy: lane.y, r: unit * 0.8, class: "ov-lane" }),
+        label(lane.x, lane.y - unit * 1.4, lane.lane));
+    }
+  }
+  if (overlays.markers) {
+    for (const m of t.markers) {
+      svg.append(svgEl("line", { x1: m.x - unit * 2, y1: m.y, x2: m.x + unit * 2, y2: m.y, class: "ov-marker" }),
+        label(m.x + unit * 2.6, m.y + unit * 0.6, m.label, "start"));
+    }
+  }
+  return svg;
+}
+
+function paint(canvas, image, lo, hi, invert) {
+  const [h, w] = image.shape;
+  canvas.width = w;
+  canvas.height = h;
+  const context = canvas.getContext("2d");
+  const frame = context.createImageData(w, h);
+  const out = frame.data;
+  const values = image.values;
+  const top = image.dtype === "uint16" ? 65535 : 255;
+  const span = hi - lo;
+  for (let i = 0, j = 0; i < values.length; i++, j += 4) {
+    let v = values[i];
+    if (invert) v = top - v;
+    let n = span === 0 ? (v > lo ? 1 : 0) : (v - lo) / span;  // §4.5
+    n = n < 0 ? 0 : n > 1 ? 1 : n;
+    out[j] = out[j + 1] = out[j + 2] = Math.floor(n * 255);
+    out[j + 3] = 255;
+  }
+  context.putImageData(frame, 0, 0);
+}
+
+function imageTab(panel) {
+  const t = panel.tables;
+  const root = el("div", { class: "image-tab" });
+  const status = el("p", { class: "meta", role: "status" });
+  const stage = el("div", { class: "stage" });
+  const controls = el("div", { class: "contrast" });
+  const saves = el("p", { class: "saves" });
+  let current = null;  // { view, image } for a channel view, null for the picture
+
+  const viewBar = el("div", { class: "segmented", role: "group", "aria-label": "What to show" });
+  const choices = [{ label: "Picture", view: null }, ...t.views.map((view) => ({ label: view.label, view }))];
+  const viewButtons = choices.map((choice) => {
+    const button = el("button", { type: "button", text: choice.label, "aria-pressed": "false" });
+    if (choice.view && !choice.view.available) {
+      button.disabled = true;
+      button.title = "Its pixels are not embedded in the file.";
+    }
+    button.addEventListener("click", () => show(choice));
+    return button;
+  });
+  viewBar.append(...viewButtons);
+
+  const overlayBar = el("div", { class: "toggles" });
+  for (const [key, text] of Object.entries(OVERLAY_LABELS)) {
+    const box = el("input", { type: "checkbox" });
+    box.checked = overlays[key];
+    box.addEventListener("change", () => { overlays[key] = box.checked; redrawOverlay(); });
+    overlayBar.append(el("label", {}, box, ` ${text}`));
+  }
+
+  function setPressed(choice) {
+    viewButtons.forEach((b, i) => b.setAttribute("aria-pressed", String(choices[i] === choice)));
+  }
+
+  function redrawOverlay() {
+    stage.querySelector(".overlay")?.remove();
+    const box = current
+      ? [0, 0, current.image.shape[1], current.image.shape[0]]
+      : t.crop ? [t.crop.x, t.crop.y, t.crop.w, t.crop.h] : null;
+    if (box) stage.append(overlay(t, box));
+  }
+
+  function saveButton(text, what, element) {
+    const button = el("button", { type: "button", text });
+    button.addEventListener("click", async () => {
+      try {
+        const file = await ask("save", { panel: panel.index, what, element });
+        download(file.bytes, `${baseName}-${file.name}`, "image/png");
+      } catch (error) {
+        status.textContent = `Could not save: ${error.message}`;
+      }
+    });
+    return button;
+  }
+
+  async function show(choice) {
+    setPressed(choice);
+    controls.replaceChildren();
+    saves.replaceChildren(saveButton("Save the picture", "picture"));
+    status.textContent = "";
+    if (!choice.view) {
+      current = null;
+      const img = el("img", { src: blobUrl(panel.png, "image/png"), alt: "The panel's picture" });
+      stage.replaceChildren(img);
+      redrawOverlay();
+      if (!t.crop) status.textContent = "The picture's place in the panel is not known, so nothing is drawn over it.";
+      return;
+    }
+    const view = choice.view;
+    stage.replaceChildren();
+    status.textContent = "Working out the aligned image… large images can take a few seconds.";
+    let data;
+    try {
+      data = await ask("aligned", { panel: panel.index, element: view.element });
+    } catch (error) {
+      status.textContent = `The aligned image could not be made: ${error.message}`;
+      return;
+    }
+    const bytes = data.pixels.byteOffset % 2 ? data.pixels.slice() : data.pixels;
+    const values = data.dtype === "uint16" ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2) : bytes;
+    current = { view, image: { shape: data.shape, dtype: data.dtype, values } };
+    status.textContent = `${data.shape[1]} × ${data.shape[0]} pixels, ${data.dtype}. Contrast and inversion here change only this view.`;
+    const canvas = el("canvas", { class: "channel" });
+    stage.replaceChildren(canvas);
+    buildContrast(canvas, view, data.dtype);
+    redrawOverlay();
+    if (view.saveable) saves.append(" ", saveButton("Save the channel image", "channel", view.element));
+    saves.append(" ", saveButton("Save the aligned image", "aligned", view.element));
+  }
+
+  function buildContrast(canvas, view, dtype) {
+    const top = dtype === "uint16" ? 65535 : 255;
+    const state = { lo: view.contrast[0], hi: view.contrast[1], invert: view.invert };
+    let queued = false;
+    const repaint = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; paint(canvas, current.image, state.lo, state.hi, state.invert); });
+    };
+    const slider = (key) => {
+      const range = el("input", { type: "range", min: Math.min(0, state[key]), max: Math.max(top, state[key]), step: 1 });
+      const number = el("input", { type: "number", step: 1, class: "num" });
+      const sync = () => { range.value = state[key]; number.value = state[key]; };
+      const set = (value) => {
+        state[key] = Math.round(Number(value));
+        if (state.lo > state.hi) state[key === "lo" ? "hi" : "lo"] = state[key];
+        lo.sync(); hi.sync(); repaint();
+      };
+      range.addEventListener("input", () => set(range.value));
+      number.addEventListener("change", () => set(number.value));
+      return { node: el("label", {}, key === "lo" ? "Black at " : "White at ", range, number), sync };
+    };
+    const lo = slider("lo");
+    const hi = slider("hi");
+    const invert = el("input", { type: "checkbox" });
+    invert.checked = state.invert;
+    invert.addEventListener("change", () => { state.invert = invert.checked; repaint(); });
+    const reset = el("button", { type: "button", text: "The panel's contrast" });
+    reset.addEventListener("click", () => {
+      Object.assign(state, { lo: view.contrast[0], hi: view.contrast[1], invert: view.invert });
+      invert.checked = state.invert; lo.sync(); hi.sync(); repaint();
+    });
+    const full = el("button", { type: "button", text: "Full range" });
+    full.addEventListener("click", () => { Object.assign(state, { lo: 0, hi: top }); lo.sync(); hi.sync(); repaint(); });
+    controls.append(lo.node, hi.node, el("label", {}, invert, " Invert"), reset, full);
+    lo.sync(); hi.sync();
+    paint(canvas, current.image, state.lo, state.hi, state.invert);
+  }
+
+  root.append(viewBar, overlayBar, controls, stage, status, saves);
+  show(choices[0]);
+  return root;
+}
