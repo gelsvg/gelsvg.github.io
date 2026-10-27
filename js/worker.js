@@ -28,7 +28,9 @@ async function start() {
 
   progress(3, "Loading the GelSVG library…");
   await micropip.install(new URL(`../wheels/${manifest.path}`, import.meta.url).href);
-  pyodide.FS.writeFile("/home/pyodide/viewer_bridge.py", await fetchText("../py/viewer_bridge.py"));
+  for (const name of ["viewer_metadata.py", "viewer_bridge.py"]) {
+    pyodide.FS.writeFile(`/home/pyodide/${name}`, await fetchText(`../py/${name}`));
+  }
   pyodide.runPython("import sys\nif '/home/pyodide' not in sys.path: sys.path.insert(0, '/home/pyodide')");
   const bridge = pyodide.pyimport("viewer_bridge");
 

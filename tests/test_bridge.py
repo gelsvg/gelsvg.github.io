@@ -91,3 +91,74 @@ def test_an_old_mywb_document_that_cannot_be_converted():
 
 def test_versions():
     assert set(bridge.versions()) == {"viewer", "gelsvg", "python", "numpy", "pillow"}
+
+
+def a_full_panel() -> bytes:
+    from gelsvg import _hashes
+
+    pixels = (np.arange(48, dtype=np.uint16).reshape(6, 8) * 900)
+    buf = io.BytesIO()
+    Image.fromarray(pixels).save(buf, format="TIFF", tiffinfo={271: "ChemiDoc", 305: "Image Lab 6.1"})
+    source = gelsvg.read_source(buf.getvalue(), file_name="blot.tif")
+    core = {"sources": [source.to_json("s1")],
+            "blot": [{"id": "c1", "source": "s1", "source_channel": "gray", "invert": True, "contrast": [0, 65535]}],
+            "orientation": {"turn": 0, "flip": False, "rotation": 0}, "output_bit_depth": 16,
+            "samples": {"conditions": [{"id": "t1", "name": "Genotype"}],
+                        "lanes": [{"id": "1", "number": 1, "x": 2, "y": 1, "details": "WT", "values": {"t1": "WT"}},
+                                  {"id": "n1"}]},
+            "rows": [{"id": "r1", "name": "p-ERK"}],
+            "bands": [{"lane": "1", "row": "r1", "shape": "rect", "x": 1, "y": 2, "w": 2, "h": 1},
+                      {"lane": "n1", "row": "r1", "shape": "point", "x": 6, "y": 2.5,
+                       "detection": {"by": "detector 1", "score": 0.93}}],
+            "markers": [{"id": "m1", "x": 0.5, "y": 3, "label": "50", "size": {"value": 50, "unit": "kDa"}}],
+            "note": "checked"}
+    quant = [{"mode": "band", "pixels": "aligned", "method": {"name": "sum", "by": "test 1"}, "inverted": False,
+              "computed_on": _hashes.quant_core_hash(core),
+              "values": [{"lane": "1", "row": "r1", "region": {"shape": "rect", "x": 1, "y": 2, "w": 2, "h": 1},
+                          "raw": 1200.5, "signal": 1000}]}]
+    crop = gelsvg.default_crop(core)
+    rendered = gelsvg.render(core, {gelsvg.pixel_hash(i): i for i in source.channel_images}, crop)
+    return gelsvg.new_panel(gelsvg.Content({"core": core, "quantifications": quant, "figure": {"crop": crop}},
+                                           rendered=rendered, channel_images=source.channel_images,
+                                           source_metadata=source.source_metadata), TOOL)
+
+
+def test_the_tables():
+    (panel,) = bridge.open_document(svg_of(a_full_panel()), "x")["panels"]
+    assert panel["notices"] == []
+    t = panel["tables"]
+    assert t["conditions"] == [{"id": "t1", "name": "Genotype"}]
+    assert t["lanes"][0] == {"lane": "1", "point": True, "x": 2, "y": 1, "details": "WT", "values": {"t1": "WT"}}
+    assert t["lanes"][1]["lane"] == "n1" and t["lanes"][1]["point"] is False
+    assert [(b["lane"], b["row"], b["shape"]) for b in t["bands"]] == [("1", "p-ERK", "rect"), ("n1", "p-ERK", "point")]
+    assert t["bands"][1]["detection"] == {"by": "detector 1", "score": 0.93}
+    assert t["markers"] == [{"label": "50", "size": {"value": 50, "unit": "kDa"}, "x": 0.5, "y": 3}]
+    (q,) = t["quantifications"]
+    assert q["stale"] == "current" and q["values"][0]["lane"] == "1" and q["values"][0]["row"] == "p-ERK"
+    (source,) = t["sources"]
+    assert source["file_name"] == "blot.tif" and source["channels"][0]["embedded"] is True
+    assert source["uses"] == ["blot element 1 (gray)"]
+    rows = {r["name"]: r["value"] for r in source["metadata"]["rows"]}
+    assert rows["Make"] == "ChemiDoc" and rows["Software"] == "Image Lab 6.1" and rows["ImageWidth"] == "8"
+    assert '"format": "https://mybioapps.com/gelsvg/panel"' in t["json"] and t["note"] == "checked"
+
+
+def test_metadata_rows_of_other_formats():
+    import viewer_metadata
+
+    png = io.BytesIO()
+    from PIL import PngImagePlugin
+    info = PngImagePlugin.PngInfo()
+    info.add_text("Comment", "hello")
+    info.add_itxt("Title", "blot", zip=True)
+    Image.fromarray(np.zeros((2, 3), dtype=np.uint8)).save(png, format="PNG", pnginfo=info)
+    entry, payload = gelsvg.read_source(png.getvalue()).metadata
+    from gelsvg._metadata import check_formal
+    rows = viewer_metadata.rows("png", check_formal("png", payload)[0], payload)
+    assert ("IHDR", "3 × 2, 8-bit, colour type 0") in [(r["name"], r["value"]) for r in rows]
+    assert "Comment: hello" in [r["value"] for r in rows] and "Title: blot" in [r["value"] for r in rows]
+    jpeg = io.BytesIO()
+    Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(jpeg, format="JPEG", comment=b"a note")
+    entry, payload = gelsvg.read_source(jpeg.getvalue()).metadata
+    rows = viewer_metadata.rows("jpeg", check_formal("jpeg", payload)[0], payload)
+    assert [r["value"].split(" (")[0] for r in rows] == ["JFIF", "a note"]

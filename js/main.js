@@ -206,7 +206,146 @@ function panelCard(panel) {
   if (panel.notices.length) body.append(noticeList(panel.notices, null));
 
   const thumb = el("img", { class: "thumb", src: blobUrl(panel.png, "image/png"), alt: `Panel ${panel.index + 1}'s picture` });
-  return el("article", { class: "panel" }, thumb, body);
+  const card = el("article", { class: "panel" }, thumb, body);
+  if (panel.tables) card.append(panelTabs(panel));
+  return card;
+}
+
+// --- the panel's tabs ------------------------------------------------------------------------
+
+function fmt(value) {
+  if (value === undefined || value === null) return "—";
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : String(parseFloat(value.toPrecision(6)));
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+function table(headers, rows) {
+  const head = el("tr", {}, ...headers.map((h) => el("th", { scope: "col", text: h })));
+  const body = rows.map((cells) => el("tr", {}, ...cells.map((c) => (c instanceof Node ? el("td", {}, c) : el("td", { text: fmt(c) })))));
+  return el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+
+function empty(text) {
+  return el("p", { class: "meta", text });
+}
+
+function tabs(items) {
+  const bar = el("div", { class: "tabs", role: "tablist" });
+  const view = el("div", { class: "tab-panel", role: "tabpanel" });
+  const buttons = items.map((item, i) => {
+    const button = el("button", { type: "button", class: "tab", role: "tab", "aria-selected": "false", text: item.label });
+    button.addEventListener("click", () => select(i));
+    return button;
+  });
+  function select(i) {
+    buttons.forEach((b, j) => b.setAttribute("aria-selected", String(i === j)));
+    view.replaceChildren(items[i].build());
+  }
+  bar.append(...buttons);
+  select(0);
+  return el("div", { class: "panel-tabs" }, bar, view);
+}
+
+function panelTabs(panel) {
+  const t = panel.tables;
+  const count = (label, n) => (n ? `${label} (${n})` : label);
+  return tabs([
+    { label: count("Samples", t.lanes.length), build: () => samplesTab(t) },
+    { label: count("Bands", t.bands.length), build: () => bandsTab(t) },
+    { label: count("Markers", t.markers.length), build: () => markersTab(t) },
+    { label: count("Quantifications", t.quantifications.length), build: () => quantificationsTab(t) },
+    { label: count("Sources", t.sources.length), build: () => sourcesTab(t) },
+    { label: "JSON", build: () => jsonTab(panel) },
+  ]);
+}
+
+function samplesTab(t) {
+  const out = el("div");
+  if (t.annotation) out.append(el("p", { class: "text-block" }, el("strong", { text: "Annotation: " }), t.annotation));
+  if (t.note) out.append(el("p", { class: "text-block" }, el("strong", { text: "Note: " }), t.note));
+  if (!t.lanes.length) {
+    out.append(empty("No lanes."));
+    return out;
+  }
+  const conditions = t.conditions;
+  out.append(table(
+    ["Lane", "x", "y", ...conditions.map((c, i) => c.name || `Condition ${i + 1}`), "Details"],
+    t.lanes.map((lane) => [lane.point ? lane.lane : `${lane.lane} (no point)`, lane.x, lane.y,
+      ...conditions.map((c) => lane.values[c.id]), lane.details]),
+  ));
+  return out;
+}
+
+function bandsTab(t) {
+  if (!t.bands.length) return empty("No bands.");
+  return table(["Row", "Lane", "Shape", "x", "y", "w", "h", "Found by"],
+    t.bands.map((b) => [b.row, b.lane, b.shape, b.x, b.y, b.w, b.h,
+      b.detection ? `${b.detection.by} (score ${fmt(b.detection.score)})` : null]));
+}
+
+function markersTab(t) {
+  if (!t.markers.length) return empty("No marker labels.");
+  return table(["Label", "Size", "x", "y"],
+    t.markers.map((m) => [m.label, m.size ? `${fmt(m.size.value)} ${m.size.unit}` : null, m.x, m.y]));
+}
+
+const STALE = {
+  current: ["ok", "Measured on this data"],
+  stale: ["differs", "Out of date: the data changed after it was measured"],
+  unknown: ["unknown", "Cannot tell whether it is out of date"],
+};
+
+function quantificationsTab(t) {
+  if (!t.quantifications.length) return empty("No quantifications.");
+  const out = el("div");
+  t.quantifications.forEach((q, i) => {
+    const [state, words] = STALE[q.stale];
+    const parts = [`${q.mode} mode`, `${q.method.name} (${q.method.by})`, q.channel ? `on ${q.channel}` : null,
+      q.inverted ? "values inverted" : null].filter(Boolean);
+    out.append(el("h5", { class: "q-title", text: `Quantification ${i + 1}: ${parts.join(" · ")}` }),
+      el("ul", { class: "checks" }, el("li", { class: state, text: words })));
+    if (q.method.parameters) out.append(el("p", { class: "meta", text: `Parameters: ${JSON.stringify(q.method.parameters)}` }));
+    const band = q.mode === "band";
+    out.append(table(["Lane", ...(band ? ["Row"] : []), "Raw", "Signal", "Background", "Peak", "Region (x, y, w, h)"],
+      q.values.map((v) => [v.lane, ...(band ? [v.row] : []), v.raw, v.signal, v.background, v.peak,
+        v.region ? [v.region.x, v.region.y, v.region.w, v.region.h].map(fmt).join(", ") : null])));
+  });
+  return out;
+}
+
+function sourcesTab(t) {
+  if (!t.sources.length) return empty("No source images.");
+  const out = el("div");
+  for (const s of t.sources) {
+    const facts = [
+      ["File", s.file_name || "(no name recorded)"],
+      ["File hash", s.file_hash ? el("code", { class: "hash", text: s.file_hash }) : "(not recorded)"],
+      ["Pixels", s.dtype && s.shape ? `${s.shape[1]} × ${s.shape[0]}, ${s.dtype}` : "(not recorded)"],
+      ["Channels", s.channels.map((c) => `${c.name}${c.embedded ? " (embedded)" : c.pixel_hash ? " (not embedded)" : " (pixels never read)"}`).join(", ")],
+      ["Used as", s.uses.join(", ") || "—"],
+    ];
+    const list = el("dl", { class: "facts" });
+    for (const [term, value] of facts) list.append(el("dt", { text: term }), el("dd", {}, value));
+    out.append(el("h5", { class: "q-title", text: `Source image ${s.id}` }), list);
+    if (s.metadata) {
+      const m = s.metadata;
+      out.append(el("p", { class: "meta", text: `Metadata: ${m.format} (version ${m.version}), ${m.byte_length} bytes`
+        + (m.readable ? "" : " — kept as it is, but not in a form this viewer reads") }));
+      if (m.rows) out.append(table(["Where", "Name", "Value"], m.rows.map((r) => [r.where, r.name, r.value])));
+    } else {
+      out.append(empty("No metadata from the source file."));
+    }
+  }
+  return out;
+}
+
+function jsonTab(panel) {
+  const save = el("button", { type: "button", text: "Save the JSON" });
+  save.addEventListener("click", () => download(new TextEncoder().encode(panel.tables.json),
+    `panel-${panel.index + 1}.json`, "application/json"));
+  return el("div", {}, el("p", { class: "meta", text: "The panel's JSON, as it is written in the file." }),
+    el("pre", { class: "json", text: panel.tables.json }), el("p", {}, save));
 }
 
 function noticeList(notices, heading) {
