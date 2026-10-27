@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; connect-src 'self' https://cdn.jsdelivr.net https://pypi.org https://files.pythonhosted.org; img-src 'self' blob: data:; style-src 'self'; worker-src 'self'">
+  <title>GelSVG Viewer</title>
+  <meta name="description" content="See the figure, the data and the checks inside a GelSVG (.gel.svg) file. Files are read in your browser and never uploaded.">
+  <link rel="stylesheet" href="css/viewer.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <header class="page-header">
+    <h1>GelSVG Viewer</h1>
+    <p class="lede">Open a <code>.gel.svg</code> file to see its figure, the data each panel carries, and whether the figure still matches that data.</p>
+    <p class="privacy">Files are read in this browser and are never uploaded.</p>
+  </header>
+
+  <main>
+    <section class="open" aria-label="Open a file">
+      <label class="drop" id="drop" for="file">
+        <span class="drop-title">Drop a <code>.gel.svg</code> file here</span>
+        <span class="drop-sub">or <span class="link">choose a file</span>. Old MyWB documents (<code>.mywb.svg</code>) can be opened too.</span>
+      </label>
+      <input type="file" id="file" accept=".svg,image/svg+xml">
+      <div class="engine" id="engine" role="status">
+        <progress id="engine-progress" max="4" value="0"></progress>
+        <span id="engine-text">Starting…</span>
+      </div>
+    </section>
+
+    <section class="document" id="document" hidden>
+      <h2 id="doc-title"></h2>
+      <div id="doc-banners"></div>
+      <div class="doc-layout">
+        <figure class="figure">
+          <img id="figure-img" alt="The figure as drawn in the file">
+          <figcaption>The figure, as the file draws it.</figcaption>
+        </figure>
+        <div class="doc-side">
+          <div id="doc-status" role="status"></div>
+          <div id="doc-notices"></div>
+        </div>
+      </div>
+      <h3 class="panels-title" id="panels-title" hidden>Panels</h3>
+      <div class="panels" id="panels"></div>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p>GelSVG is an open format for gel and blot figures that carry their own data. The specification is a draft.</p>
+    <p id="versions"></p>
+    <p><a href="https://github.com/gelsvg/gelsvg">The gelsvg library</a> · <a href="https://github.com/gelsvg/gelsvg.github.io">Source of this page</a> · MIT License</p>
+  </footer>
+</body>
+</html>
