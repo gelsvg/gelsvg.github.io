@@ -198,7 +198,7 @@ function panelCard(panel) {
     body.append(el("p", { class: "meta", text: meta.join(" · ") }));
     const c = panel.counts;
     body.append(el("p", { class: "counts", text: [
-      plural(c.sources, "source image"), `${c.embedded_channels} embedded`, plural(c.lanes, "lane"),
+      plural(c.sources, "source image"), `${c.embedded_source_channels} embedded`, plural(c.lanes, "lane"),
       plural(c.rows, "row"), plural(c.bands, "band"), plural(c.markers, "marker label"),
       plural(c.quantifications, "quantification")].join(" · ") }));
     if (panel.newer_revision) {
@@ -265,12 +265,7 @@ function tabs(items, level = "main") {
 function panelTabs(panel) {
   const t = panel.tables;
   const count = (label, n) => (n ? `${label} (${n})` : label);
-  const marker = t.views.filter((v) => v.element === "marker");
-  const blot = t.views.filter((v) => v.element !== "marker");
-  const images = [...marker, ...blot].map((view) => ({
-    label: view.element === "marker" ? "Marker image" : blot.length > 1 ? `Blot image ${view.element + 1}` : "Blot image",
-    build: () => imageView(panel, view, blot.length),
-  }));
+  const images = t.views.map((view) => ({ label: view.label, build: () => imageView(panel, view) }));
   return tabs([
     { label: "Images", build: () => tabs([
       ...images,
@@ -294,7 +289,6 @@ function facts(pairs) {
 
 function roiTab(t) {
   const out = el("div");
-  const blots = t.drawing.filter((d) => d.kind === "blot").length;
   out.append(el("h5", { class: "q-title", text: "ROI" }), t.roi
     ? facts([["Left, top", `${fmt(t.roi.x)}, ${fmt(t.roi.y)}`], ["Width × height", `${fmt(t.roi.w)} × ${fmt(t.roi.h)}`]])
     : empty("No ROI: the whole aligned image is the figure."));
@@ -315,8 +309,7 @@ function roiTab(t) {
     ["Picture's range", crop ? `${fmt(crop.x)}, ${fmt(crop.y)}, ${fmt(crop.w)} × ${fmt(crop.h)}${isRoi ? " (the ROI)" : ""}` : "not known"],
     ["Bit depth", t.output_bit_depth ? `${t.output_bit_depth}-bit` : "not known"],
   ]));
-  const name = (d) => d.kind === "marker" ? "Marker image"
-    : blots > 1 ? `Blot image ${d.index + 1}${d.index === 0 ? " (reference)" : ""}` : "Blot image";
+  const name = (d) => `${d.label}${d.reference ? " (reference)" : ""}`;
   const colour = (c) => {
     if (!c) return "grey";
     const swatch = el("span", { class: "swatch" });
@@ -325,10 +318,10 @@ function roiTab(t) {
   };
   const lined = (d) => d.turn === null || d.turn === undefined ? "the reference channel"
     : `${d.turn ? `${d.turn}° clockwise` : "no turn"}${d.flip ? ", flipped" : ""}, then sized to the reference channel`;
-  out.append(el("h5", { class: "q-title", text: "How each image is drawn" }),
-    table(["Image", "Channel", "Source file", "Black, white at", "Inverted", "Colour", "Lined up as"],
-      t.drawing.map((d) => [name(d), d.channel, d.file_name, `${fmt(d.contrast[0])}, ${fmt(d.contrast[1])}`, d.invert,
-        colour(d.color), lined(d)])));
+  out.append(el("h5", { class: "q-title", text: "How each panel channel is drawn" }),
+    table(["Panel channel", "Drawn", "Source channel", "Source file", "Black, white at", "Inverted", "Colour", "Lined up as"],
+      t.drawing.map((d) => [name(d), d.drawn, d.channel, d.file_name, `${fmt(d.contrast[0])}, ${fmt(d.contrast[1])}`,
+        d.invert, d.drawn ? colour(d.color) : "—", lined(d)])));
   return out;
 }
 
@@ -395,7 +388,9 @@ function shown(kept, all, noun) {
 
 function samplesList(t, only, f) {
   const out = el("div");
-  if (t.annotation) out.append(el("p", { class: "text-block" }, el("strong", { text: "Annotation: " }), t.annotation));
+  for (const [side, text] of Object.entries(t.annotations)) {
+    out.append(el("p", { class: "text-block" }, el("strong", { text: `Annotation (${side}): ` }), text));
+  }
   if (t.note) out.append(el("p", { class: "text-block" }, el("strong", { text: "Note: " }), t.note));
   if (!t.lanes.length) {
     out.append(empty("No lanes."));
@@ -424,8 +419,9 @@ function markersList(t, only, f) {
   if (!t.markers.length) return empty("No marker labels.");
   const markers = only ? t.markers.filter(f.marker) : t.markers;
   return el("div", {}, shown(markers.length, t.markers.length, "marker label"),
+    t.marker_unit ? el("p", { class: "text-block" }, el("strong", { text: "Unit: " }), t.marker_unit) : null,
     table(["Label", "Size", "x", "y"],
-      markers.map((m) => [m.label, m.size ? `${fmt(m.size.value)} ${m.size.unit}` : null, m.x, m.y])));
+      markers.map((m) => [m.label, m.size ? `${fmt(m.size.value)}${m.size.unit ? ` ${m.size.unit}` : ""}` : null, m.x, m.y])));
 }
 
 const STALE = {
@@ -460,7 +456,7 @@ function sourcesTab(t) {
       ["File", s.file_name || "(no name recorded)"],
       ["File hash", s.file_hash ? el("code", { class: "hash", text: s.file_hash }) : "(not recorded)"],
       ["Pixels", s.dtype && s.shape ? `${s.shape[1]} × ${s.shape[0]}, ${s.dtype}` : "(not recorded)"],
-      ["Channels", s.channels.map((c) => `${c.name}${c.embedded ? " (embedded)" : c.pixel_hash ? " (not embedded)" : " (pixels never read)"}`).join(", ")],
+      ["Source channels", s.source_channels.map((c) => `${c.name}${c.embedded ? " (embedded)" : c.pixel_hash ? " (not embedded)" : " (pixels never read)"}`).join(", ")],
       ["Used as", s.uses.join(", ") || "—"],
     ];
     const list = el("dl", { class: "facts" });
@@ -657,13 +653,12 @@ function paint(canvas, image, lo, hi, invert) {
   context.putImageData(frame, 0, 0);
 }
 
-function imageView(panel, view, blotCount) {
+function imageView(panel, view) {
   const t = panel.tables;
   const root = el("div", { class: "image-tab" });
-  const what = view.element === "marker" ? "The marker image" : blotCount > 1
-    ? `Blot image ${view.element + 1}${view.element === 0 ? " (the reference channel)" : ""}` : "The blot image";
+  const what = `${view.label}${view.reference ? " (the reference channel)" : ""}${view.drawn ? "" : ", not drawn in the picture"}`;
   root.append(el("p", { class: "meta", text:
-    `${what}: channel ${view.channel}${view.file_name ? ` of ${view.file_name}` : ""}, turned and resized the way the panel lines it up.` }));
+    `${what}: source channel ${view.channel}${view.file_name ? ` of ${view.file_name}` : ""}, turned and resized the way the panel lines it up.` }));
   if (!view.available) {
     root.append(el("div", { class: "banner" }, el("p", { text:
       "Its pixels are not embedded in the file, so it cannot be shown here. The panel's own picture is beside its card." })));
@@ -726,7 +721,7 @@ function imageView(panel, view, blotCount) {
     status.textContent = `${w} × ${h} pixels, ${data.dtype}. Contrast and inversion here change only this view.`;
     buildContrast(canvas, data.dtype);
     redrawOverlay();
-    if (view.saveable) saves.append(saveFromPython("Save the channel image", { panel: panel.index, what: "channel", element: view.element }));
+    if (view.saveable) saves.append(saveFromPython("Save the source channel image", { panel: panel.index, what: "channel", element: view.element }));
     saves.append(saveFromPython("Save the aligned image", { panel: panel.index, what: "aligned", element: view.element }));
   }
 

@@ -16,8 +16,10 @@ TOOL = gelsvg.Tool("test", "1")
 def a_panel(note: str = "") -> bytes:
     pixels = (np.arange(48, dtype=np.uint8).reshape(6, 8) * 5)
     core = {"sources": [{"id": "s1", "dtype": "uint8", "shape": [6, 8],
-                         "channels": [{"name": "gray", "pixel_hash": gelsvg.pixel_hash(pixels)}]}],
-            "blot": [{"id": "c1", "source": "s1", "source_channel": "gray", "invert": False, "contrast": [0, 255]}],
+                         "source_channels": [{"name": "gray", "pixel_hash": gelsvg.pixel_hash(pixels)}]}],
+            "channels": [{"id": "c1", "drawn": True, "source": "s1", "source_channel": "gray", "invert": False,
+                          "contrast": [0, 255]}],
+            "reference_channel": "c1",
             "orientation": {"turn": 0, "flip": False, "rotation": 0}, "output_bit_depth": 8,
             "samples": {"lanes": [{"id": "1", "number": 1, "x": 2, "y": 1}]}}
     if note:
@@ -25,7 +27,7 @@ def a_panel(note: str = "") -> bytes:
     crop = gelsvg.default_crop(core)
     rendered = gelsvg.render(core, {gelsvg.pixel_hash(pixels): pixels}, crop)
     return gelsvg.new_panel(gelsvg.Content({"core": core, "figure": {"crop": crop}}, rendered=rendered,
-                                           channel_images=[pixels]), TOOL)
+                                           source_channel_images=[pixels]), TOOL)
 
 
 def svg_of(*pngs: bytes, extra: str = "") -> bytes:
@@ -40,7 +42,7 @@ def test_a_gelsvg_document():
     (panel,) = result["panels"]
     assert panel["png"] == png and panel["readable"]
     assert panel["checks"] == {"drawn_from": "ok", "rendered_hash": "ok", "svg_hash": "absent"}
-    assert panel["counts"]["lanes"] == 1 and panel["counts"]["embedded_channels"] == 1
+    assert panel["counts"]["lanes"] == 1 and panel["counts"]["embedded_source_channels"] == 1
     assert panel["written_by"] == {"name": "test", "version": "1"} and panel["notices"] == []
 
 
@@ -101,25 +103,29 @@ def a_full_panel() -> bytes:
     Image.fromarray(pixels).save(buf, format="TIFF", tiffinfo={271: "ChemiDoc", 305: "Image Lab 6.1"})
     source = gelsvg.read_source(buf.getvalue(), file_name="blot.tif")
     core = {"sources": [source.to_json("s1")],
-            "blot": [{"id": "c1", "source": "s1", "source_channel": "gray", "invert": True, "contrast": [0, 65535]}],
+            "channels": [{"id": "c1", "drawn": True, "source": "s1", "source_channel": "gray", "invert": True,
+                          "contrast": [0, 65535]}],
+            "reference_channel": "c1",
             "orientation": {"turn": 0, "flip": False, "rotation": 0}, "output_bit_depth": 16,
             "samples": {"conditions": [{"id": "t1", "name": "Genotype"}],
                         "lanes": [{"id": "1", "number": 1, "x": 2, "y": 1, "details": "WT", "values": {"t1": "WT"}},
                                   {"id": "n1"}]},
-            "rows": [{"id": "r1", "name": "p-ERK"}],
+            "rows": [{"id": "r1", "name": "p-ERK", "channel": "c1"}],
             "bands": [{"lane": "1", "row": "r1", "shape": "rect", "x": 1, "y": 2, "w": 2, "h": 1},
                       {"lane": "n1", "row": "r1", "shape": "point", "x": 6, "y": 2.5,
                        "detection": {"by": "detector 1", "score": 0.93}}],
-            "markers": [{"id": "m1", "x": 0.5, "y": 3, "label": "50", "size": {"value": 50, "unit": "kDa"}}],
+            "markers": [{"id": "m1", "x": 0.5, "y": 3, "label": "50 kDa"}, {"id": "m2", "x": 0.5, "y": 4, "label": "37"}],
+            "marker_unit": "kDa",
+            "annotations": {"left": "IP: Flag", "right": "anti-p-ERK"},
             "note": "checked"}
     quant = [{"mode": "band", "pixels": "aligned", "method": {"name": "sum", "by": "test 1"}, "inverted": False,
               "computed_on": _hashes.quant_core_hash(core),
               "values": [{"lane": "1", "row": "r1", "region": {"shape": "rect", "x": 1, "y": 2, "w": 2, "h": 1},
                           "raw": 1200.5, "signal": 1000}]}]
     crop = gelsvg.default_crop(core)
-    rendered = gelsvg.render(core, {gelsvg.pixel_hash(i): i for i in source.channel_images}, crop)
+    rendered = gelsvg.render(core, {gelsvg.pixel_hash(i): i for i in source.source_channel_images}, crop)
     return gelsvg.new_panel(gelsvg.Content({"core": core, "quantifications": quant, "figure": {"crop": crop}},
-                                           rendered=rendered, channel_images=source.channel_images,
+                                           rendered=rendered, source_channel_images=source.source_channel_images,
                                            source_metadata=source.source_metadata), TOOL)
 
 
@@ -135,18 +141,22 @@ def test_the_tables():
     assert t["rows"] == [{"id": "r1", "name": "p-ERK"}] and t["lanes"][0]["id"] == "1"
     assert t["redrawable"] is True and t["views"][0]["size"] == [6, 8]
     assert t["orientation"] == {"turn": 0, "flip": False, "rotation": 0} and t["output_bit_depth"] == 16
-    assert t["drawing"] == [{"kind": "blot", "index": 0, "channel": "gray", "file_name": "blot.tif", "shape": [6, 8],
+    assert t["drawing"] == [{"index": 0, "label": "Panel channel 1", "role": None, "drawn": True, "reference": True,
+                             "channel": "gray", "file_name": "blot.tif", "shape": [6, 8],
                              "contrast": [0, 65535], "invert": True, "color": None, "turn": None, "flip": None}]
     assert t["bands"][1]["detection"] == {"by": "detector 1", "score": 0.93}
-    assert t["markers"] == [{"label": "50", "size": {"value": 50, "unit": "kDa"}, "x": 0.5, "y": 3}]
+    assert t["markers"] == [{"label": "50 kDa", "size": {"value": 50, "unit": "kDa"}, "x": 0.5, "y": 3},
+                            {"label": "37", "size": {"value": 37, "unit": "kDa"}, "x": 0.5, "y": 4}]
+    assert t["marker_unit"] == "kDa"
     (q,) = t["quantifications"]
     assert q["stale"] == "current" and q["values"][0]["lane"] == "1" and q["values"][0]["row"] == "p-ERK"
     (source,) = t["sources"]
-    assert source["file_name"] == "blot.tif" and source["channels"][0]["embedded"] is True
-    assert source["uses"] == ["blot element 1 (gray)"]
+    assert source["file_name"] == "blot.tif" and source["source_channels"][0]["embedded"] is True
+    assert source["uses"] == ["Panel channel 1 (gray)"]
     rows = {r["name"]: r["value"] for r in source["metadata"]["rows"]}
     assert rows["Make"] == "ChemiDoc" and rows["Software"] == "Image Lab 6.1" and rows["ImageWidth"] == "8"
     assert '"format": "https://mybioapps.com/gelsvg/panel"' in t["json"] and t["note"] == "checked"
+    assert t["annotations"] == {"left": "IP: Flag", "right": "anti-p-ERK"}
 
 
 def test_metadata_rows_of_other_formats():
@@ -186,7 +196,7 @@ def test_aligned_images_and_saves():
     from gelsvg._embedded import decode_channel_png
     assert np.array_equal(decode_channel_png(channel["bytes"])[0], pixels)
     aligned_png = bridge.save(0, "aligned", 0)
-    assert np.array_equal(decode_channel_png(aligned_png["bytes"])[0], pixels) and aligned_png["name"].endswith("-blot-1-aligned.png")
+    assert np.array_equal(decode_channel_png(aligned_png["bytes"])[0], pixels) and aligned_png["name"].endswith("-channel-1-aligned.png")
 
 
 def test_a_view_without_embedded_pixels():
@@ -206,14 +216,16 @@ def test_redraw_and_compare():
 def test_a_picture_that_was_changed_after_drawing():
     pixels = (np.arange(48, dtype=np.uint8).reshape(6, 8) * 5)
     core = {"sources": [{"id": "s1", "dtype": "uint8", "shape": [6, 8],
-                         "channels": [{"name": "gray", "pixel_hash": gelsvg.pixel_hash(pixels)}]}],
-            "blot": [{"id": "c1", "source": "s1", "source_channel": "gray", "invert": False, "contrast": [0, 255]}],
+                         "source_channels": [{"name": "gray", "pixel_hash": gelsvg.pixel_hash(pixels)}]}],
+            "channels": [{"id": "c1", "drawn": True, "source": "s1", "source_channel": "gray", "invert": False,
+                          "contrast": [0, 255]}],
+            "reference_channel": "c1",
             "orientation": {"turn": 0, "flip": False, "rotation": 0}, "output_bit_depth": 8}
     painted = pixels.copy()
     painted[2, 3] = 0
     painted[4, 5] = 255
     png = gelsvg.new_panel(gelsvg.Content({"core": core, "figure": {"crop": gelsvg.default_crop(core)}},
-                                          rendered=painted, channel_images=[pixels]), TOOL)
+                                          rendered=painted, source_channel_images=[pixels]), TOOL)
     bridge.open_document(svg_of(png), "x")
     result = bridge.compare(0)
     # 95 painted 0 at (2, 3), 185 painted 255 at (4, 5)

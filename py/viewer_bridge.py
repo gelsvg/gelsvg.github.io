@@ -60,7 +60,7 @@ def _panel(panel) -> dict:
             "rendered_hash": _state(panel.checks, "rendered_hash"),
             "svg_hash": _state(panel.checks, "svg_hash", recorded=panel.figure.get("svg_hash") is not None),
         },
-        counts={"sources": len(view.sources or ()), "embedded_channels": len(panel.channel_images),
+        counts={"sources": len(view.sources or ()), "embedded_source_channels": len(panel.source_channel_images),
                 "lanes": len(view.lanes), "rows": len(view.rows), "bands": len(view.bands),
                 "markers": len(view.markers), "quantifications": len(panel.quantifications)},
         tables=_tables(panel),
@@ -78,7 +78,7 @@ def _tables(panel) -> dict:
     lane_name = {lane["id"]: str(lane["number"]) if "number" in lane else lane["id"] for lane in lanes}
     rows = core.get("rows", [])
     row_name = {row["id"]: row.get("name") or row["id"] for row in rows}
-    blot_name = {element["id"]: f"blot element {i + 1}" for i, element in enumerate(core.get("blot", []))}
+    channel_name = {element["id"]: _label(core, i, element) for i, element in enumerate(core.get("channels", []))}
 
     def where(value: dict) -> dict:
         out = {"lane": lane_name.get(value["lane"], value["lane"])}
@@ -90,23 +90,22 @@ def _tables(panel) -> dict:
     for q in panel.quantifications:
         quantifications.append({
             "mode": q["mode"], "pixels": q["pixels"], "method": q["method"], "inverted": q["inverted"],
-            "channel": blot_name.get(q.get("channel"), q.get("channel")),
+            "channel": channel_name.get(q.get("channel"), q.get("channel")),
             "stale": "unknown" if q["stale"] is None else "stale" if q["stale"] else "current",
             "values": [{**where(v), **{k: v[k] for k in ("raw", "signal", "background", "peak") if v.get(k) is not None},
                         "region": v["region"]} for v in q["values"]],
         })
 
     uses: dict[str, list[str]] = {}
-    for i, element in enumerate(core.get("blot", [])):
-        uses.setdefault(element["source"], []).append(f"blot element {i + 1} ({element['source_channel']})")
-    if "marker" in core:
-        uses.setdefault(core["marker"]["source"], []).append(f"marker image ({core['marker']['source_channel']})")
+    for i, element in enumerate(core.get("channels", [])):
+        uses.setdefault(element["source"], []).append(f"{_label(core, i, element)} ({element['source_channel']})")
     views = _views(panel, core)
     sources = []
     for source in core.get("sources", []):
         item = {k: source.get(k) for k in ("id", "file_name", "file_hash", "dtype", "shape")}
-        item["channels"] = [{"name": c["name"], "pixel_hash": c.get("pixel_hash"),
-                             "embedded": c.get("pixel_hash") in panel.channel_images} for c in source["channels"]]
+        item["source_channels"] = [{"name": c["name"], "pixel_hash": c.get("pixel_hash"),
+                                    "embedded": c.get("pixel_hash") in panel.source_channel_images}
+                                   for c in source["source_channels"]]
         item["uses"] = uses.get(source["id"], [])
         record = panel.core.source_metadata.get(source.get("source_metadata"))
         if record is not None:
@@ -124,10 +123,14 @@ def _tables(panel) -> dict:
         "rows": [{"id": row["id"], "name": row.get("name")} for row in rows],
         "bands": [{**where(b), "lane_id": b["lane"], "row_id": b["row"], "shape": b["shape"], "x": b["x"], "y": b["y"],
                    "w": b.get("w"), "h": b.get("h"), "detection": b.get("detection")} for b in core.get("bands", [])],
-        "markers": [{"label": m["label"], "size": m.get("size"), "x": m["x"], "y": m["y"]} for m in core.get("markers", [])],
+        # A size is read from the label (§5.14), not written beside it.
+        "markers": [{"label": m["label"], "size": size, "x": m["x"], "y": m["y"]}
+                    for m, size in zip(core.get("markers", []),
+                                       gelsvg.marker_sizes(core.get("markers", []), core.get("marker_unit")))],
+        "marker_unit": core.get("marker_unit"),
         "quantifications": quantifications,
         "sources": sources,
-        "annotation": core.get("annotation"),
+        "annotations": core.get("annotations", {}),
         "note": core.get("note"),
         "json": json.dumps(panel.raw, indent=2, ensure_ascii=False),
         "roi": core.get("roi"),
@@ -137,25 +140,34 @@ def _tables(panel) -> dict:
         "output_bit_depth": core.get("output_bit_depth"),
         "drawing": _drawing(core),
         "redrawable": panel.rendered is not None and panel.figure.get("crop") is not None
-                      and all(v["available"] for v in views if v["element"] != "marker"),
+                      and any(v["drawn"] for v in views) and all(v["available"] for v in views if v["drawn"]),
     }
 
 
+def _label(core: dict, index: int, element: dict) -> str:
+    """What the page calls a panel channel: its name, or what it is."""
+
+    if element.get("name"):
+        return element["name"]
+    if element.get("role") == "marker":
+        return "Marker channel"
+    return f"Panel channel {index + 1}"
+
+
 def _drawing(core: dict) -> list[dict]:
-    """How each image is drawn: its channel, contrast, inversion and colour,
-    and how it is lined up with the reference channel."""
+    """How each panel channel is drawn: its source channel, contrast,
+    inversion and colour, whether it is drawn, and how it is lined up with
+    the reference channel."""
 
     files = {s["id"]: (s.get("file_name"), s.get("shape")) for s in core.get("sources", [])}
-    items = [("blot", i, e) for i, e in enumerate(core.get("blot", []))]
-    if "marker" in core:
-        items.append(("marker", None, core["marker"]))
     out = []
-    for kind, i, e in items:
+    for i, e in enumerate(core.get("channels", [])):
         file_name, shape = files.get(e["source"], (None, None))
-        out.append({"kind": kind, "index": i, "channel": e["source_channel"], "file_name": file_name, "shape": shape,
+        reference = e["id"] == core.get("reference_channel")
+        out.append({"index": i, "label": _label(core, i, e), "role": e.get("role"), "drawn": e["drawn"],
+                    "reference": reference, "channel": e["source_channel"], "file_name": file_name, "shape": shape,
                     "contrast": e["contrast"], "invert": e["invert"], "color": e.get("color"),
-                    "turn": e.get("turn") if kind == "marker" or i else None,
-                    "flip": e.get("flip") if kind == "marker" or i else None})
+                    "turn": None if reference else e.get("turn"), "flip": None if reference else e.get("flip")})
     return out
 
 
@@ -164,47 +176,40 @@ def _channels_of(core: dict, element: dict) -> list[str | None]:
     if source is None:
         return [None]
     names = ["red", "green", "blue"] if element["source_channel"] == "average" else [element["source_channel"]]
-    hashes = {c["name"]: c.get("pixel_hash") for c in source["channels"]}
+    hashes = {c["name"]: c.get("pixel_hash") for c in source["source_channels"]}
     return [hashes.get(n) for n in names]
 
 
 def _views(panel, core: dict) -> list[dict]:
-    """The aligned images the page can show: one per blot element, and the
-    marker image."""
+    """The aligned images the page can show: one per panel channel."""
 
-    items = [(i, e, f"Blot element {i + 1}") for i, e in enumerate(core.get("blot", []))]
-    if "marker" in core:
-        items.append(("marker", core["marker"], "Marker image"))
     try:
         size = list(gelsvg.aligned_size(core))
     except ValueError:
         size = None
     out = []
-    for key, element, label in items:
+    for key, element in enumerate(core.get("channels", [])):
         hashes = _channels_of(core, element)
         source = next((s for s in core.get("sources", []) if s["id"] == element["source"]), {})
-        out.append({"element": key, "label": f"{label} ({element['source_channel']})",
+        out.append({"element": key, "label": _label(core, key, element), "role": element.get("role"),
+                    "drawn": element["drawn"], "reference": element["id"] == core.get("reference_channel"),
                     "channel": element["source_channel"], "file_name": source.get("file_name"),
-                    "available": all(h in panel.channel_images for h in hashes),
-                    "saveable": element["source_channel"] != "average" and hashes[0] in panel.channel_images,
+                    "available": all(h in panel.source_channel_images for h in hashes),
+                    "saveable": element["source_channel"] != "average" and hashes[0] in panel.source_channel_images,
                     "contrast": element["contrast"], "invert": element["invert"], "dtype": source.get("dtype"),
                     "size": size})
     return out
 
 
-def _element(value):
-    return "marker" if value == "marker" else int(value)
-
-
 def aligned(panel_index: int, element) -> dict:
-    """The aligned image (§4.2) of a blot element or the marker image, as
-    little-endian samples for a typed array on the page."""
+    """The aligned image (§4.2) of a panel channel (by its place in
+    `channels`), as little-endian samples for a typed array on the page."""
 
-    element = _element(element)
+    element = int(element)
     key = (panel_index, element)
     if key not in _open["aligned"]:
         panel = _open["doc"].panels[panel_index]
-        _open["aligned"][key] = gelsvg.aligned_image(panel.to_json()["core"], panel.channel_images, element)
+        _open["aligned"][key] = gelsvg.aligned_image(panel.to_json()["core"], panel.source_channel_images, element)
     image = _open["aligned"][key]
     return {"dtype": "uint8" if image.dtype.itemsize == 1 else "uint16", "shape": list(image.shape),
             "pixels": image.astype("<u2" if image.dtype.itemsize == 2 else "u1").tobytes()}
@@ -244,7 +249,7 @@ def compare(panel_index: int) -> dict:
     if crop is None:
         return cannot("Which part of the panel the picture shows is not known ('crop'), so it cannot be drawn again.")
     try:
-        drawn = gelsvg.render(panel.to_json()["core"], panel.channel_images, crop)
+        drawn = gelsvg.render(panel.to_json()["core"], panel.source_channel_images, crop)
     except ValueError as exc:
         text = str(exc)
         if "is not given" in text or "never read" in text or "no 'shape'" in text:
@@ -283,21 +288,21 @@ def compare(panel_index: int) -> dict:
 
 def save(panel_index: int, what: str, element=None) -> dict:
     """A file to save: the panel's picture without its data, an embedded
-    channel image as it was embedded, or an aligned image; all PNG."""
+    source channel image as it was embedded, or an aligned image; all PNG."""
 
     panel = _open["doc"].panels[panel_index]
     name = f"panel-{panel_index + 1}"
     if what == "picture":
         return {"bytes": _svghash.png_without_panel_data(panel.carrier.png), "name": f"{name}-picture.png"}
-    element = _element(element)
-    suffix = "marker" if element == "marker" else f"blot-{element + 1}"
+    element = int(element)
+    core = panel.to_json()["core"]
+    item = core["channels"][element]
+    suffix = "marker" if item.get("role") == "marker" else f"channel-{element + 1}"
     if what == "aligned":
         aligned(panel_index, element)
         return {"bytes": _encode.channel_png(_open["aligned"][(panel_index, element)]), "name": f"{name}-{suffix}-aligned.png"}
-    core = panel.to_json()["core"]
-    item = core["marker"] if element == "marker" else core["blot"][element]
     (key,) = _channels_of(core, item)
-    return {"bytes": panel.core.channel_images[key]["payload"], "name": f"{name}-{suffix}-channel.png"}
+    return {"bytes": panel.core.source_channel_images[key]["payload"], "name": f"{name}-{suffix}-source.png"}
 
 
 def open_document(data: bytes, file_name: str) -> dict:
