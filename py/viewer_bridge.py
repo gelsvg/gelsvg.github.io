@@ -81,7 +81,10 @@ def _tables(panel) -> dict:
     channel_name = {element["id"]: _label(core, i, element) for i, element in enumerate(core.get("channels", []))}
 
     def where(value: dict) -> dict:
-        out = {"lane": lane_name.get(value["lane"], value["lane"])}
+        # A value of the region mode names no lane (§7.3).
+        out = {}
+        if "lane" in value:
+            out["lane"] = lane_name.get(value["lane"], value["lane"])
         if "row" in value:
             out["row"] = row_name.get(value["row"], value["row"])
         return out

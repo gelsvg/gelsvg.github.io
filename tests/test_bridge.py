@@ -155,8 +155,33 @@ def test_the_tables():
     assert source["uses"] == ["Panel channel 1 (gray)"]
     rows = {r["name"]: r["value"] for r in source["metadata"]["rows"]}
     assert rows["Make"] == "ChemiDoc" and rows["Software"] == "Image Lab 6.1" and rows["ImageWidth"] == "8"
-    assert '"format": "https://mybioapps.com/gelsvg/panel"' in t["json"] and t["note"] == "checked"
+    assert '"format": "https://gelsvg.github.io/panel"' in t["json"] and t["note"] == "checked"
     assert t["annotations"] == {"left": "IP: Flag", "right": "anti-p-ERK"}
+
+
+def test_a_quantification_of_regions_names_no_lane():
+    from gelsvg import _hashes
+
+    pixels = (np.arange(48, dtype=np.uint8).reshape(6, 8) * 5)
+    core = {"sources": [{"id": "s1", "dtype": "uint8", "shape": [6, 8],
+                         "source_channels": [{"name": "gray", "pixel_hash": gelsvg.pixel_hash(pixels)}]}],
+            "channels": [{"id": "c1", "drawn": True, "source": "s1", "source_channel": "gray", "invert": False,
+                          "contrast": [0, 255]}],
+            "reference_channel": "c1",
+            "orientation": {"turn": 0, "flip": False, "rotation": 0}, "output_bit_depth": 8,
+            "samples": {"lanes": [{"id": "1", "number": 1, "x": 2, "y": 1}]}}
+    quant = [{"mode": "region", "pixels": "aligned", "channel": "c1", "method": {"name": "sum", "by": "test 1"},
+              "inverted": False, "computed_on": _hashes.quant_core_hash(core),
+              "values": [{"region": {"shape": "rect", "x": 1, "y": 2, "w": 2, "h": 1}, "raw": 120.0, "signal": 100}]}]
+    crop = gelsvg.default_crop(core)
+    rendered = gelsvg.render(core, {gelsvg.pixel_hash(pixels): pixels}, crop)
+    png = gelsvg.new_panel(gelsvg.Content({"core": core, "quantifications": quant, "figure": {"crop": crop}},
+                                          rendered=rendered, source_channel_images=[pixels]), TOOL)
+    (panel,) = bridge.open_document(svg_of(png), "x")["panels"]
+    (q,) = panel["tables"]["quantifications"]
+    assert q["mode"] == "region" and q["stale"] == "current"
+    (value,) = q["values"]
+    assert "lane" not in value and value["signal"] == 100 and value["region"]["x"] == 1
 
 
 def test_metadata_rows_of_other_formats():

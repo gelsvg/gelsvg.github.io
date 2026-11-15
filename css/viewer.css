@@ -117,7 +117,7 @@ summary { cursor: pointer; font-size: 0.9rem; }
 .notice-group ul { margin: 0; padding-left: 18px; font-size: 0.86rem; }
 .notice-group .where { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
 .kind-UNREADABLE h5, .kind-DAMAGED h5, .kind-BROKEN h5 { color: var(--bad); }
-.kind-UNKNOWN h5, .kind-UNHANDLED h5 { color: var(--warn); }
+.kind-UNKNOWN h5, .kind-DECLINED h5 { color: var(--warn); }
 
 .panel-tabs { grid-column: 1 / -1; }
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); }

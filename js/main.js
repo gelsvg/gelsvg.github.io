@@ -14,9 +14,9 @@ const KINDS = [
   ["DAMAGED", "Damaged after it was written"],
   ["BROKEN", "Written wrongly"],
   ["UNKNOWN", "Not known to this reader"],
-  ["UNHANDLED", "Not handled"],
+  ["DECLINED", "Not handled"],
   ["REINTERPRETED", "Read differently"],
-  ["ASSEMBLY", "Assembly"],
+  ["ASSEMBLIES", "Assembly"],
 ];
 
 const CHECKS = {
@@ -441,8 +441,9 @@ function quantificationsTab(t) {
       el("ul", { class: "checks" }, el("li", { class: state, text: words })));
     if (q.method.parameters) out.append(el("p", { class: "meta", text: `Parameters: ${JSON.stringify(q.method.parameters)}` }));
     const band = q.mode === "band";
-    out.append(table(["Lane", ...(band ? ["Row"] : []), "Raw", "Signal", "Background", "Peak", "Region (x, y, w, h)"],
-      q.values.map((v) => [v.lane, ...(band ? [v.row] : []), v.raw, v.signal, v.background, v.peak,
+    const lane = q.mode !== "region"; // a region names no lane (§7.3)
+    out.append(table([...(lane ? ["Lane"] : []), ...(band ? ["Row"] : []), "Raw", "Signal", "Background", "Peak", "Region (x, y, w, h)"],
+      q.values.map((v) => [...(lane ? [v.lane] : []), ...(band ? [v.row] : []), v.raw, v.signal, v.background, v.peak,
         v.region ? [v.region.x, v.region.y, v.region.w, v.region.h].map(fmt).join(", ") : null])));
   });
   return out;
