@@ -194,11 +194,15 @@ def _views(panel, core: dict) -> list[dict]:
     for key, element in enumerate(core.get("channels", [])):
         hashes = _channels_of(core, element)
         source = next((s for s in core.get("sources", []) if s["id"] == element["source"]), {})
+        # No aligned image of a core that cannot be drawn (its reference
+        # channel or orientation unreadable), however many pixels it holds.
+        drawable = size is not None
         out.append({"element": key, "label": _label(core, key, element), "role": element.get("role"),
                     "drawn": element["drawn"], "reference": element["id"] == core.get("reference_channel"),
                     "channel": element["source_channel"], "file_name": source.get("file_name"),
-                    "available": all(h in panel.source_channel_images for h in hashes),
-                    "saveable": element["source_channel"] != "average" and hashes[0] in panel.source_channel_images,
+                    "available": drawable and all(h in panel.source_channel_images for h in hashes),
+                    "saveable": drawable and element["source_channel"] != "average"
+                    and hashes[0] in panel.source_channel_images,
                     "contrast": element["contrast"], "invert": element["invert"], "dtype": source.get("dtype"),
                     "size": size})
     return out

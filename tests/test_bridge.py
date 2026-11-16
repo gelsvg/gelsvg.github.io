@@ -224,6 +224,18 @@ def test_aligned_images_and_saves():
     assert np.array_equal(decode_channel_png(aligned_png["bytes"])[0], pixels) and aligned_png["name"].endswith("-channel-1-aligned.png")
 
 
+def test_a_view_of_a_core_that_cannot_be_drawn(monkeypatch):
+    # Every pixel embedded, but the core cannot be drawn (its reference
+    # channel or orientation unreadable): no aligned image to offer or save.
+    def cannot_draw(core):
+        raise ValueError("The core cannot be drawn: a key it needs is missing.")
+
+    monkeypatch.setattr(bridge.gelsvg, "aligned_size", cannot_draw)
+    result = bridge.open_document(svg_of(a_full_panel()), "x")
+    (view,) = result["panels"][0]["tables"]["views"]
+    assert view["available"] is False and view["saveable"] is False and view["size"] is None
+
+
 def test_a_view_without_embedded_pixels():
     result = bridge.open_document(old_document(), "old.mywb.svg")
     (view,) = result["panels"][0]["tables"]["views"]

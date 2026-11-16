@@ -16,6 +16,9 @@ its packages.
 - `js/worker.js`: starts Pyodide in a Web Worker and installs the library.
 - `py/viewer_bridge.py`: what the page asks of the library, as plain data.
 - `wheels/`: the library's wheel, built by `tools/build_wheel.py`.
+- `panel/index.html`: what `https://gelsvg.github.io/panel`, the format's
+  name in every file, opens: for now, a note that the specification is a
+  draft, pointing to the viewer.
 
 ## Working on it
 
