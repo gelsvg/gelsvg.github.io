@@ -31,6 +31,10 @@ Run the bridge's tests:
 
     python -m pytest tests
 
+Run the file-switching and download tests (Node.js, no packages to install):
+
+    node --test tests/test_*.cjs
+
 See the page locally (a web server is needed; opening the file directly
 does not run the worker):
 

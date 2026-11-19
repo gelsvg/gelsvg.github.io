@@ -6,8 +6,12 @@ const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "modu
 const $ = (id) => document.getElementById(id);
 const pending = new Map();
 let nextId = 1;
-let urls = [];
-let baseName = "gelsvg";
+let nextDocumentId = 1;
+let currentDocument = null;
+
+function isCurrent(doc) {
+  return doc === currentDocument;
+}
 
 const KINDS = [
   ["UNREADABLE", "Unreadable"],
@@ -52,9 +56,9 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-function blobUrl(bytes, type) {
+function blobUrl(doc, bytes, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
-  urls.push(url);
+  doc.urls.push(url);
   return url;
 }
 
@@ -89,41 +93,64 @@ worker.onmessage = (event) => {
   }
 };
 
-function ask(type, payload, transfer = []) {
+function ask(doc, type, payload, transfer = []) {
+  if (!isCurrent(doc)) return Promise.reject(new Error("This file is no longer open."));
   const id = nextId++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    worker.postMessage({ id, type, ...payload }, transfer);
+    try {
+      worker.postMessage({ ...payload, id, type, documentId: doc.id }, transfer);
+    } catch (error) {
+      pending.delete(id);
+      reject(error);
+    }
   });
 }
 
 // --- opening a file --------------------------------------------------------------------------
 
 async function openFile(file) {
-  for (const url of urls) URL.revokeObjectURL(url);
-  urls = [];
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  baseName = file.name.replace(/(\.gel|\.mywb|\.my_wb)?\.svg$/i, "") || "gelsvg";
+  const previous = currentDocument;
+  const doc = {
+    id: nextDocumentId++,
+    baseName: file.name.replace(/(\.gel|\.mywb|\.my_wb)?\.svg$/i, "") || "gelsvg",
+    urls: [],
+    cleanups: [],
+  };
+  currentDocument = doc;
   $("document").hidden = false;
   $("doc-title").textContent = file.name;
   $("doc-banners").replaceChildren();
   $("doc-notices").replaceChildren();
   $("panels").replaceChildren();
   $("panels-title").hidden = true;
-  $("figure-img").src = blobUrl(bytes, "image/svg+xml");
+  $("figure-img").removeAttribute("src");
+  $("figure-img").closest("figure").hidden = true;
   $("doc-status").replaceChildren(el("p", { class: "meta", text: "Reading the data in the file…" }));
+  if (previous) {
+    for (const cleanup of previous.cleanups) cleanup();
+    for (const url of previous.urls) URL.revokeObjectURL(url);
+  }
 
   try {
+    // Invalidate the old document even while this file's bytes are being
+    // read, or Python is still starting. A queued old button cannot act on it.
+    worker.postMessage({ type: "select", documentId: doc.id });
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (!isCurrent(doc)) return;
+    $("figure-img").src = blobUrl(doc, bytes, "image/svg+xml");
     const copy = bytes.slice();  // the page keeps `bytes` for the figure
-    const result = await ask("open", { bytes: copy.buffer, name: file.name }, [copy.buffer]);
-    showResult(result, file.name);
+    const result = await ask(doc, "open", { bytes: copy.buffer, name: file.name }, [copy.buffer]);
+    if (!isCurrent(doc)) return;
+    showResult(result, file.name, doc);
   } catch (error) {
+    if (!isCurrent(doc)) return;
     $("doc-status").replaceChildren(el("div", { class: "banner bad" },
       el("p", { text: `The file could not be read: ${error.message}` })));
   }
 }
 
-function showResult(result, fileName) {
+function showResult(result, fileName, doc) {
   $("doc-status").replaceChildren();
   const banners = $("doc-banners");
 
@@ -131,12 +158,12 @@ function showResult(result, fileName) {
     const versions = [...new Set(result.converted.panels.map((p) => p.schema_version))].join(", ");
     const notes = result.converted.panels.flatMap((p) => p.notes);
     const save = el("button", { type: "button", text: "Save as .gel.svg" });
-    save.addEventListener("click", () => download(result.converted.svg, gelName(fileName), "image/svg+xml"));
+    save.addEventListener("click", () => download(doc, result.converted.svg, gelName(fileName), "image/svg+xml"));
     banners.append(el("div", { class: "banner warn" },
       el("p", { text: `This is an old MyWB document (schema ${versions}). It was converted to GelSVG to be shown here; the file itself was not changed.` }),
       notes.length ? el("ul", {}, ...notes.map((n) => el("li", { text: n }))) : null,
       el("p", {}, save)));
-    $("figure-img").src = blobUrl(result.converted.svg, "image/svg+xml");
+    $("figure-img").src = blobUrl(doc, result.converted.svg, "image/svg+xml");
   }
   if (result.conversion_error) {
     banners.append(el("div", { class: "banner bad" },
@@ -158,7 +185,7 @@ function showResult(result, fileName) {
   if (result.panels.length) {
     $("panels-title").hidden = false;
     $("panels-title").textContent = plural(result.panels.length, "panel");
-    $("panels").append(...result.panels.map(panelCard));
+    $("panels").append(...result.panels.map((panel) => panelCard(panel, doc)));
   }
 }
 
@@ -166,8 +193,9 @@ function gelName(name) {
   return name.replace(/(\.mywb|\.my_wb)?\.svg$/i, "") + ".gel.svg";
 }
 
-function download(bytes, name, type) {
-  const link = el("a", { href: blobUrl(bytes, type), download: name });
+function download(doc, bytes, name, type) {
+  if (!isCurrent(doc)) return;
+  const link = el("a", { href: blobUrl(doc, bytes, type), download: name });
   document.body.append(link);
   link.click();
   link.remove();
@@ -175,7 +203,7 @@ function download(bytes, name, type) {
 
 // --- panels ----------------------------------------------------------------------------------
 
-function panelCard(panel) {
+function panelCard(panel, doc) {
   const body = el("div");
   const title = el("h4", { text: `Panel ${panel.index + 1}` });
   if (panel.assembly) title.append(el("small", { text: `member ${panel.assembly.member} of ${panel.assembly.members}` }));
@@ -207,11 +235,11 @@ function panelCard(panel) {
   }
   if (panel.notices.length) body.append(noticeList(panel.notices, null));
 
-  const thumb = el("img", { class: "thumb", src: blobUrl(panel.png, "image/png"), alt: `Panel ${panel.index + 1}'s picture` });
+  const thumb = el("img", { class: "thumb", src: blobUrl(doc, panel.png, "image/png"), alt: `Panel ${panel.index + 1}'s picture` });
   const side = el("div", { class: "thumb-side" }, thumb);
-  if (panel.readable) side.append(el("p", { class: "saves" }, saveFromPython("Save the picture", { panel: panel.index, what: "picture" })));
+  if (panel.readable) side.append(el("p", { class: "saves" }, saveFromPython("Save the picture", { panel: panel.index, what: "picture" }, doc)));
   const card = el("article", { class: "panel" }, side, body);
-  if (panel.tables) card.append(panelTabs(panel));
+  if (panel.tables) card.append(panelTabs(panel, doc));
   return card;
 }
 
@@ -262,21 +290,21 @@ function tabs(items, level = "main") {
   return el("div", { class: "panel-tabs" }, bar, view);
 }
 
-function panelTabs(panel) {
+function panelTabs(panel, doc) {
   const t = panel.tables;
   const count = (label, n) => (n ? `${label} (${n})` : label);
-  const images = t.views.map((view) => ({ label: view.label, build: () => imageView(panel, view) }));
+  const images = t.views.map((view) => ({ label: view.label, build: () => imageView(panel, view, doc) }));
   return tabs([
     { label: "Images", build: () => tabs([
       ...images,
-      ...(t.redrawable ? [{ label: "Redraw", build: () => redrawTab(panel) }] : []),
+      ...(t.redrawable ? [{ label: "Redraw", build: () => redrawTab(panel, doc) }] : []),
       { label: "ROI and orientation", build: () => roiTab(t) },
     ], "sub") },
     { label: "Labels and bands", build: () => labelsAndBands(t) },
     { label: count("Quantifications", t.quantifications.length), build: () => quantificationsTab(t) },
     { label: "File", build: () => tabs([
       { label: count("Source files", t.sources.length), build: () => sourcesTab(t) },
-      { label: "JSON", build: () => jsonTab(panel) },
+      { label: "JSON", build: () => jsonTab(panel, doc) },
     ], "sub") },
   ]);
 }
@@ -475,9 +503,9 @@ function sourcesTab(t) {
   return out;
 }
 
-function jsonTab(panel) {
+function jsonTab(panel, doc) {
   const save = el("button", { type: "button", text: "Save the JSON" });
-  save.addEventListener("click", () => download(new TextEncoder().encode(panel.tables.json),
+  save.addEventListener("click", () => download(doc, new TextEncoder().encode(panel.tables.json),
     `panel-${panel.index + 1}.json`, "application/json"));
   return el("div", {}, el("p", { class: "meta", text: "The panel's JSON, as it is written in the file." }),
     el("pre", { class: "json", text: panel.tables.json }), el("p", {}, save));
@@ -572,14 +600,16 @@ function svgEl(tag, attrs = {}) {
   return node;
 }
 
-function saveFromPython(text, request) {
+function saveFromPython(text, request, doc) {
   const button = el("button", { type: "button", text });
   button.addEventListener("click", async () => {
+    if (!isCurrent(doc)) return;
     button.disabled = true;
     try {
-      const file = await ask("save", request);
-      download(file.bytes, `${baseName}-${file.name}`, "image/png");
+      const file = await ask(doc, "save", request);
+      download(doc, file.bytes, `${doc.baseName}-${file.name}`, "image/png");
     } catch (error) {
+      if (!isCurrent(doc)) return;
       button.title = `Could not save: ${error.message}`;
     } finally {
       button.disabled = false;
@@ -654,7 +684,7 @@ function paint(canvas, image, lo, hi, invert) {
   context.putImageData(frame, 0, 0);
 }
 
-function imageView(panel, view) {
+function imageView(panel, view, doc) {
   const t = panel.tables;
   const root = el("div", { class: "image-tab" });
   const what = `${view.label}${view.reference ? " (the reference channel)" : ""}${view.drawn ? "" : ", not drawn in the picture"}`;
@@ -707,11 +737,13 @@ function imageView(panel, view) {
   async function load() {
     let data;
     try {
-      data = await ask("aligned", { panel: panel.index, element: view.element });
+      data = await ask(doc, "aligned", { panel: panel.index, element: view.element });
     } catch (error) {
+      if (!isCurrent(doc)) return;
       status.textContent = `The aligned image could not be made: ${error.message}`;
       return;
     }
+    if (!isCurrent(doc)) return;
     const bytes = data.pixels.byteOffset % 2 ? data.pixels.slice() : data.pixels;
     const values = data.dtype === "uint16" ? new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2) : bytes;
     image = { shape: data.shape, dtype: data.dtype, values };
@@ -722,8 +754,8 @@ function imageView(panel, view) {
     status.textContent = `${w} × ${h} pixels, ${data.dtype}. Contrast and inversion here change only this view.`;
     buildContrast(canvas, data.dtype);
     redrawOverlay();
-    if (view.saveable) saves.append(saveFromPython("Save the source channel image", { panel: panel.index, what: "channel", element: view.element }));
-    saves.append(saveFromPython("Save the aligned image", { panel: panel.index, what: "aligned", element: view.element }));
+    if (view.saveable) saves.append(saveFromPython("Save the source channel image", { panel: panel.index, what: "channel", element: view.element }, doc));
+    saves.append(saveFromPython("Save the aligned image", { panel: panel.index, what: "aligned", element: view.element }, doc));
   }
 
   function buildContrast(canvas, dtype) {
@@ -733,7 +765,10 @@ function imageView(panel, view) {
     const repaint = () => {
       if (queued) return;
       queued = true;
-      requestAnimationFrame(() => { queued = false; paint(canvas, image, state.lo, state.hi, state.invert); });
+      requestAnimationFrame(() => {
+        queued = false;
+        if (isCurrent(doc)) paint(canvas, image, state.lo, state.hi, state.invert);
+      });
     };
     const slider = (key) => {
       const range = el("input", { type: "range", min: Math.min(0, state[key]), max: Math.max(top, state[key]), step: 1 });
@@ -770,10 +805,11 @@ function imageView(panel, view) {
   const watcher = new IntersectionObserver((entries) => {
     if (entries.some((e) => e.isIntersecting)) {
       watcher.disconnect();
-      load();
+      if (isCurrent(doc)) load();
     }
   });
   watcher.observe(stage);
+  doc.cleanups.push(() => watcher.disconnect());
   return root;
 }
 
@@ -785,15 +821,19 @@ const REDRAWN = {
   cannot: ["unknown", "Cannot be drawn again"],
 };
 
-function redrawTab(panel) {
+function redrawTab(panel, doc) {
   const out = el("div", { class: "redraw" });
   const button = el("button", { type: "button", text: "Redraw and compare" });
   button.addEventListener("click", async () => {
+    if (!isCurrent(doc)) return;
     button.disabled = true;
     out.replaceChildren(el("p", { class: "meta", role: "status", text: "Drawing the picture again…" }));
     try {
-      out.replaceChildren(redrawResult(panel, await ask("compare", { panel: panel.index })));
+      const result = await ask(doc, "compare", { panel: panel.index });
+      if (!isCurrent(doc)) return;
+      out.replaceChildren(redrawResult(panel, result, doc));
     } catch (error) {
+      if (!isCurrent(doc)) return;
       out.replaceChildren(el("div", { class: "banner bad" }, el("p", { text: `It could not be drawn again: ${error.message}` })));
     } finally {
       button.disabled = false;
@@ -806,7 +846,7 @@ function redrawTab(panel) {
     el("p", {}, button), out);
 }
 
-function redrawResult(panel, r) {
+function redrawResult(panel, r, doc) {
   const [state, word] = REDRAWN[r.state];
   const out = el("div");
   out.append(el("ul", { class: "checks" }, el("li", { class: state, text: word })), el("p", { text: r.message }));
@@ -819,11 +859,11 @@ function redrawResult(panel, r) {
   const pictures = [["In the file", panel.png], ["Drawn again", r.redrawn_png]];
   if (r.difference_png) pictures.push(["Where they differ (magenta, brighter where more)", r.difference_png]);
   out.append(el("div", { class: "compare" }, ...pictures.map(([caption, bytes]) =>
-    el("figure", {}, el("img", { src: blobUrl(bytes, "image/png"), alt: caption }), el("figcaption", { text: caption })))));
+    el("figure", {}, el("img", { src: blobUrl(doc, bytes, "image/png"), alt: caption }), el("figcaption", { text: caption })))));
   const saves = el("p", { class: "saves" });
   const saveAs = (text, bytes, suffix) => {
     const button = el("button", { type: "button", text });
-    button.addEventListener("click", () => download(bytes, `${baseName}-panel-${panel.index + 1}-${suffix}.png`, "image/png"));
+    button.addEventListener("click", () => download(doc, bytes, `${doc.baseName}-panel-${panel.index + 1}-${suffix}.png`, "image/png"));
     return button;
   };
   saves.append(saveAs("Save the picture drawn again", r.redrawn_png, "redrawn"));

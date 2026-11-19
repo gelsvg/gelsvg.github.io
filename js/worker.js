@@ -50,18 +50,42 @@ function toPlain(proxy) {
 const ready = start();
 ready.catch((error) => postMessage({ type: "failed", text: String(error && error.message ? error.message : error) }));
 
+// A selection arrives before the page starts reading the file's bytes.
+// Keep it separate from the successfully opened document: a failed open
+// must never leave the previous file available under a new selection.
+let selectedDocumentId = 0;
+let activeDocumentId = null;
+
 onmessage = async (event) => {
-  const { id, type } = event.data;
+  const { id, type, documentId } = event.data;
+  if (type === "select") {
+    if (Number.isSafeInteger(documentId) && documentId > selectedDocumentId) {
+      selectedDocumentId = documentId;
+      activeDocumentId = null;
+    }
+    return;
+  }
   try {
+    const requireSelected = () => {
+      if (!selectedDocumentId || documentId !== selectedDocumentId) throw new Error("This file is no longer open.");
+    };
+    requireSelected();
     const bridge = await ready;
+    requireSelected();  // another file may have been selected while Python started
     let result;
-    if (type === "open") result = toPlain(bridge.open_document(new Uint8Array(event.data.bytes), event.data.name));
-    else if (type === "aligned") result = toPlain(bridge.aligned(event.data.panel, event.data.element));
-    else if (type === "save") result = toPlain(bridge.save(event.data.panel, event.data.what, event.data.element ?? null));
-    else if (type === "compare") result = toPlain(bridge.compare(event.data.panel));
-    else throw new Error(`Unknown request ${type}.`);
-    postMessage({ type: "done", id, result });  // copied, never transferred: no buffer may be Python's memory
+    if (type === "open") {
+      activeDocumentId = null;
+      result = toPlain(bridge.open_document(new Uint8Array(event.data.bytes), event.data.name));
+      activeDocumentId = documentId;
+    } else {
+      if (documentId !== activeDocumentId) throw new Error("This file has not been opened successfully.");
+      if (type === "aligned") result = toPlain(bridge.aligned(event.data.panel, event.data.element));
+      else if (type === "save") result = toPlain(bridge.save(event.data.panel, event.data.what, event.data.element ?? null));
+      else if (type === "compare") result = toPlain(bridge.compare(event.data.panel));
+      else throw new Error(`Unknown request ${type}.`);
+    }
+    postMessage({ type: "done", id, documentId, result });  // copied, never transferred: no buffer may be Python's memory
   } catch (error) {
-    postMessage({ type: "error", id, text: String(error && error.message ? error.message : error) });
+    postMessage({ type: "error", id, documentId, text: String(error && error.message ? error.message : error) });
   }
 };
